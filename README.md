@@ -95,6 +95,37 @@ The package automatically emits six types of events for each database change:
 | `db:change:{collection}:{id}` | Specific document | `db:change:users:507f1f77bcf86cd799439011` |
 | `db:{type}:{collection}:{id}` | Type + document | `db:insert:users:507f1f77bcf86cd799439011` |
 
+### Event listeners
+
+You can add serverside listeners to those db events to trigger specific actions on the server:
+
+```js
+function sendNotification(change){
+  const userId = change.docId; // or change.documentKey._id
+  NotificationService.send(userId,"Welcome to DB"); 
+}
+
+MongoRealtime.listen("db:insert:users",sendNotification);
+```
+
+#### Adding many callback to one event
+
+```js
+MongoRealtime.listen("db:insert:users",anotherAction);
+MongoRealtime.listen("db:insert:users",anotherAction2);
+```
+
+#### Removing event listeners
+
+```js
+MongoRealtime.removeListener("db:insert:users",sendNotification); // remove this specific action from this event
+
+MongoRealtime.removeListener("db:insert:users"); // remove all actions from this event
+
+MongoRealtime.removeAllListeners(); // remove all listeners
+
+```
+
 ### Event Payload Structure
 
 Each event contains the full MongoDB change object:
@@ -102,6 +133,8 @@ Each event contains the full MongoDB change object:
 ```javascript
 {
   "_id": {...},
+  "col":"users", // same as ns.coll
+  "docId":"...", // same as documentKey._id 
   "operationType": "insert|update|delete|replace",
   "documentKey": { "_id": "..." },
   "ns": { "db": "mydb", "coll": "users" },
