@@ -4,6 +4,8 @@ class MongoRealtime {
   /** @type {import("socket.io").Server} */ static io;
   /** @type {import("mongoose").Connection} */ static connection;
   /** @type {[import("socket.io").Socket]} */ static sockets = [];
+  /** @type {Record<String, [(change:ChangeStreamDocument)=>void]>} */ static #listeners =
+    {};
 
   /**
    * Initializes the socket system.
@@ -71,6 +73,8 @@ class MongoRealtime {
 
       changeStream.on("change", (change) => {
         const colName = change.ns.coll.toLowerCase();
+        change.col = colName;
+
         const type = change.operationType;
         const id = change.documentKey?._id;
 
@@ -87,15 +91,60 @@ class MongoRealtime {
         ];
 
         if (id) {
+          change.docId = id;
           const e_change_doc = `${e_change_col}:${id}`;
           const e_change_type_doc = `${e_change_type_col}:${id}`;
           events.push(e_change_doc, e_change_type_doc);
         }
         for (let e of events) {
           this.io.emit(e, change);
+          this.notifyListeners(e, change);
         }
       });
     });
+  }
+
+  /**
+   * Notify all event listeners
+   *
+   * @param {String} e - Name of the event
+   * @param {ChangeStreamDocument} change - Change Stream
+   */
+  static notifyListeners(e, change) {
+    if (this.#listeners[e]) {
+      for (let c of this.#listeners[e]) {
+        c(change);
+      }
+    }
+  }
+
+  /**
+   * Subscribe to an event
+   *
+   * @param {String} key - Name of the event
+   * @param {(change:ChangeStreamDocument)=>void} cb - Callback
+   */
+  static listen(key, cb) {
+    if (!this.#listeners[key]) this.#listeners[key] = [];
+    this.#listeners[key].push(cb);
+  }
+
+  /**
+   * Remove one or all listeners of an event
+   *
+   * @param {String} key - Name of the event
+   * @param {(change:ChangeStreamDocument)=>void} cb - Callback
+   */
+  static removeListener(key, cb) {
+    if (cb) this.#listeners[key] = this.#listeners[key].filter((c) => c != cb);
+    else this.#listeners[key] = [];
+  }
+
+  /**
+   * Unsubscribe to all events
+   */
+  static removeAllListeners() {
+    this.#listeners = {};
   }
 }
 
