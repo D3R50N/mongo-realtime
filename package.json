@@ -1,0 +1,26 @@
+{
+  "name": "mongo-realtime",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {},
+  "keywords": [
+    "mongo",
+    "mongoose",
+    "replica",
+    "stream",
+    "realtime",
+    "mongodb",
+    "socket",
+    "db"
+  ],
+  "author": "D3R50N",
+  "license": "MIT",
+  "repository": {
+    "url": "https://github.com/D3R50N/mongo-realtime.git"
+  },
+  "description": "A Node.js package that combines Socket.IO and MongoDB Change Streams to deliver real-time database updates to your WebSocket clients.",
+  "dependencies": {
+    "mongoose": "^8.17.0",
+    "socket.io": "^4.8.1"
+  }
+}
