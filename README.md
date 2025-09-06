@@ -2,6 +2,8 @@
 
 A Node.js package that combines Socket.IO and MongoDB Change Streams to deliver real-time database updates to your WebSocket clients.
 
+![Banner](logo.png)
+
 ## 🚀 Features
 
 - **Real-time updates**: Automatically detects changes in MongoDB and broadcasts them via Socket.IO
@@ -119,9 +121,7 @@ MongoRealtime.listen("db:insert:users",anotherAction2);
 
 ```js
 MongoRealtime.removeListener("db:insert:users",sendNotification); // remove this specific action from this event
-
 MongoRealtime.removeListener("db:insert:users"); // remove all actions from this event
-
 MongoRealtime.removeAllListeners(); // remove all listeners
 
 ```
