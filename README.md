@@ -71,6 +71,8 @@ Initializes the socket system and MongoDB Change Streams.
 |-----------|------|-------------|
 | `options.connection` | `mongoose.Connection`* | Active Mongoose connection |
 | `options.server` | `http.Server`* | HTTP server to attach Socket.IO |
+| `options.authentify` | `Function` | Function to authenticate socket connections. Should return true if authenticated |
+| `options.middlewares` | `Array[Function]` | Array of Socket.IO middlewares |
 | `options.onSocket` | `Function` | Callback on socket connection |
 | `options.offSocket` | `Function` | Callback on socket disconnection |
 | `options.watch` | `Array[String]` | Collections to only watch. Listen to all when is empty |
@@ -219,29 +221,25 @@ MongoRealtime.init({
 ### Socket Authentication
 
 ```javascript
-function authenticateSocket(socket){
-    socket.on('authenticate', (token) => {
-      if (isValidToken(token)) {
-        socket.authenticated = true;
-        socket.emit('authenticated');
-      } else {
-        socket.disconnect();
-      }
-    });
-
-    socket.use((packet, next) => {
-      if (socket.authenticated) {
-        next();
-      } else {
-        next(new Error('Unauthenticated'));
-      }
-    });
+function authenticateSocket(token, socket){
+   const verify = AuthService.verifyToken(token);
+   if(verify){
+     socket.user = verify.user; // attach user info to socket
+     return true; // should return true to accept the connection
+   }
+   return false;
 }
 
 MongoRealtime.init({
   connection: mongoose.connection,
   server: server,
-  onSocket: authenticateSocket,
+  authentify: authenticateSocket,
+  middlewares: [
+    (socket, next) => {
+     console.log(`User is authenticated: ${socket.user.email}`);
+     next();
+    }
+  ],
   offSocket: (socket, reason) => {
     console.log(`Socket ${socket.id} disconnected: ${reason}`);
   }

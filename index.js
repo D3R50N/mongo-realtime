@@ -12,6 +12,8 @@ class MongoRealtime {
    *
    * @param {Object} options
    * @param {import("mongoose").Connection} options.connection - Active Mongoose connection
+   * @param {(token:String, socket: import("socket.io").Socket) => boolean | Promise<boolean>} options.authentify - Auth function that should return true if `token` is valid
+   * @param {[( socket: import("socket.io").Socket, next: (err?: ExtendedError) => void) => void]} options.middlewares - Register mmiddlewares on incoming socket
    * @param {(socket: import("socket.io").Socket) => void} options.onSocket - Callback triggered when a socket connects
    * @param {(socket: import("socket.io").Socket, reason: import("socket.io").DisconnectReason) => void} options.offSocket - Callback triggered when a socket disconnects
    * @param {import("http").Server} options.server - HTTP server to attach Socket.IO to
@@ -22,6 +24,8 @@ class MongoRealtime {
   static init({
     connection,
     server,
+    authentify,
+    middlewares=[],
     onSocket,
     offSocket,
     watch = [],
@@ -36,6 +40,29 @@ class MongoRealtime {
 
     watch = watch.map((s) => s.toLowerCase());
     ignore = ignore.map((s) => s.toLowerCase());
+
+    this.io.use(async (socket, next) => {
+      if (!!authentify) {
+        try {
+          const token = socket.handshake.auth.token;
+          if (!token) return next(new Error("No token provided"));
+
+          const authorized =await authentify(token, socket);
+          if (authorized===true) return next(); // exactly returns true
+
+          return next(new Error("Unauthorized"));
+        } catch (error) {
+          return next(new Error("Authentication error"));
+        }
+      } else {
+        return next();
+      }
+      
+    });
+
+    for (let middleware of middlewares) {
+      this.io.use(middleware);
+    }
 
     this.io.on("connection", (socket) => {
       this.sockets = [...this.io.sockets.sockets.values()];
