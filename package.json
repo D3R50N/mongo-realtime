@@ -16,7 +16,7 @@
   "author": "D3R50N",
   "license": "MIT",
   "repository": {
-    "url": "https://github.com/D3R50N/mongo-realtime.git"
+    "url": "git+https://github.com/D3R50N/mongo-realtime.git"
   },
   "description": "A Node.js package that combines Socket.IO and MongoDB Change Streams to deliver real-time database updates to your WebSocket clients.",
   "dependencies": {
