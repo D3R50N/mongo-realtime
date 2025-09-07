@@ -25,7 +25,7 @@ class MongoRealtime {
     connection,
     server,
     authentify,
-    middlewares=[],
+    middlewares = [],
     onSocket,
     offSocket,
     watch = [],
@@ -44,7 +44,7 @@ class MongoRealtime {
     this.io.use(async (socket, next) => {
       if (!!authentify) {
         try {
-          const token = socket.handshake.auth.token;
+          const token = socket.handshake.auth.token || socket.handshake.headers.authorization;
           if (!token) return next(new Error("No token provided"));
 
           const authorized =await authentify(token, socket);
@@ -57,7 +57,6 @@ class MongoRealtime {
       } else {
         return next();
       }
-      
     });
 
     for (let middleware of middlewares) {
