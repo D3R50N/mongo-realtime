@@ -198,6 +198,8 @@ class MongoRealtime {
           );
 
           this.io.emit(`db:stream:${key}`, filtered);
+          this.notifyListeners(`db:stream:${key}`, filtered);
+
         });
       });
 
