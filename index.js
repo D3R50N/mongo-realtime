@@ -61,7 +61,7 @@ class MongoRealtime {
    * @param {(socket: import("socket.io").Socket) => void} options.onSocket - Callback triggered when a socket connects
    * @param {(socket: import("socket.io").Socket, reason: import("socket.io").DisconnectReason) => void} options.offSocket - Callback triggered when a socket disconnects
    * @param {import("http").Server} options.server - HTTP server to attach Socket.IO to
-   * @param {[String]} options.autoListStream - Collections to stream automatically. If empty, will stream no collection. If null, will stream all collections. 
+   * @param {[String]} options.autoListStream - Collections to stream automatically. If empty, will stream no collection. If null, will stream all collections.
    * @param {[String]} options.watch - Collections to watch. If empty, will watch all collections
    * @param {[String]} options.ignore - Collections to ignore. Can override `watch`
    *
@@ -87,7 +87,9 @@ class MongoRealtime {
     this.io.use(async (socket, next) => {
       if (!!authentify) {
         try {
-          const token = socket.handshake.auth.token|| socket.handshake.headers.authorization;
+          const token =
+            socket.handshake.auth.token ||
+            socket.handshake.headers.authorization;
           if (!token) return next(new Error("NO_TOKEN_PROVIDED"));
 
           const authorized = await authentify(token, socket);
@@ -145,7 +147,10 @@ class MongoRealtime {
       /** Setup main streams */
       let collectionsToStream = [];
       if (autoListStream == null) collectionsToStream = this.collections;
-      else collectionsToStream = this.collections.filter(c=>autoListStream.includes(c))
+      else
+        collectionsToStream = this.collections.filter((c) =>
+          autoListStream.includes(c)
+        );
       for (let col of collectionsToStream) this.addListStream(col, col);
 
       /** Emit streams on change */
@@ -195,7 +200,6 @@ class MongoRealtime {
           this.io.emit(`db:stream:${key}`, filtered);
         });
       });
-
 
       /** Emit listen events on change */
       changeStream.on("change", async (change) => {
@@ -270,7 +274,9 @@ class MongoRealtime {
 
     filter ??= (_, __) => true;
     if (this.#streams[streamId]) {
-      throw new Error(`Stream '${streamId}' already registered or is reserved.`);
+      throw new Error(
+        `Stream '${streamId}' already registered or is reserved.`
+      );
     }
     this.#streams[streamId] = {
       collection,
