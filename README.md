@@ -268,14 +268,12 @@ MongoRealtime.init({
   autoListStream: ["users"], // automatically stream users collection only
 });
 
-
 MongoRealtime.addListStream("users", "users", (doc) => !!doc.email); // will throw an error as streamId 'users' already exists
 
-MongoRealtime.removeListStream("users"); // remove the previous stream  
+MongoRealtime.removeListStream("users"); // remove the previous stream
 MongoRealtime.addListStream("users", "users", (doc) => !!doc.email); // client can listen to db:stream:users
 
 MongoRealtime.addListStream("usersWithEmail", "users", (doc) => !!doc.email); // client can listen to db:stream:usersWithEmail
-
 ```
 
 #### ⚠️ NOTICE
@@ -304,7 +302,7 @@ MongoRealtime.init({
   authentify: (token, socket) => {
     try {
       socket.uid = decodeToken(token).uid; // setup user id from token
-      return true; 
+      return true;
     } catch (error) {
       return false;
     }
@@ -317,22 +315,28 @@ MongoRealtime.init({
       (doc) => doc._id == socket.uid
     );
   },
+  offSocket: (socket) => {
+    // clean up when user disconnects
+    MongoRealtime.removeListStream(`userPost:${socket.uid}`);
+  },
 });
-
 
 // ...
 // or activate stream from a controller or middleware
 app.get("/my-posts", (req, res) => {
   const { user } = req;
   try {
-    MongoRealtime.addListStream(`userPosts:${user._id}`, "posts", (doc) => doc.authorId === user._id);
+    MongoRealtime.addListStream(
+      `userPosts:${user._id}`,
+      "posts",
+      (doc) => doc.authorId === user._id
+    );
   } catch (e) {
     // stream already exists
   }
 
   res.send("Stream activated");
 });
-
 ```
 
 #### Usecase with async filter
@@ -345,8 +349,11 @@ MongoRealtime.addListStream("authorizedUsers", "users", async (doc) => {
   return isAdmin && doc.email.endsWith("@mydomain.com");
 });
 
-MongoRealtime.addListStream("bestPosts", "posts",async (doc) => doc.likes > await PostService.getLikesThreshold());
-
+MongoRealtime.addListStream(
+  "bestPosts",
+  "posts",
+  async (doc) => doc.likes > (await PostService.getLikesThreshold())
+);
 ```
 
 ## 📚 Dependencies
@@ -370,4 +377,4 @@ MIT
 
 ## 🤝 Contributing
 
-Contributions are welcome! Feel free to open an issue or submit a pull request.\*\*\*\*
+Contributions are welcome! Feel free to open an issue or submit a pull request.
