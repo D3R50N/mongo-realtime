@@ -1,11 +1,55 @@
 const { Server } = require("socket.io");
 
+function sortObj(obj = {}) {
+  const out = {};
+  for (let k of Object.keys(obj).sort()) {
+    const v = obj[k];
+    out[k] = typeof v == "object" && !Array.isArray(v) ? sortObj(v) : v;
+  }
+
+  return out;
+}
+
+/**
+ * @typedef {Object} ChangeStreamDocument
+ * @property {"insert"|"update"|"replace"|"delete"|"invalidate"|"drop"|"dropDatabase"|"rename"} operationType
+ *   The type of operation that triggered the event.
+ *
+ * @property {Object} ns
+ * @property {string} ns.db - Database name
+ * @property {string} ns.coll - Collection name
+ *
+ * @property {Object} documentKey
+ * @property {import("bson").ObjectId|string} documentKey._id - The document’s identifier
+ *
+ * @property {Object} [fullDocument]
+ *   The full document after the change (only present if `fullDocument: "updateLookup"` is enabled).
+ *
+ * @property {Object} [updateDescription]
+ * @property {Object.<string, any>} [updateDescription.updatedFields]
+ *   Fields that were updated during an update operation.
+ * @property {string[]} [updateDescription.removedFields]
+ *   Fields that were removed during an update operation.
+ *
+ * @property {Object} [rename] - Info about the collection rename (if operationType is "rename").
+ *
+ * @property {Date} [clusterTime] - Logical timestamp of the event.
+ */
+
 class MongoRealtime {
   /** @type {import("socket.io").Server} */ static io;
   /** @type {import("mongoose").Connection} */ static connection;
-  /** @type {[import("socket.io").Socket]} */ static sockets = [];
   /** @type {Record<String, [(change:ChangeStreamDocument)=>void]>} */ static #listeners =
     {};
+  /** @type {Record<String, [Object]>} */
+  static #cache = {};
+  static sockets = () => [...this.io.sockets.sockets.values()];
+
+  /**@type {Record<String, {collection:String,filter: (doc:Object)=>Promise<boolean>}>} */
+  static #streams = {};
+
+  /** @type {[String]} - All DB collections */
+  static collections = [];
 
   /**
    * Initializes the socket system.
@@ -17,6 +61,7 @@ class MongoRealtime {
    * @param {(socket: import("socket.io").Socket) => void} options.onSocket - Callback triggered when a socket connects
    * @param {(socket: import("socket.io").Socket, reason: import("socket.io").DisconnectReason) => void} options.offSocket - Callback triggered when a socket disconnects
    * @param {import("http").Server} options.server - HTTP server to attach Socket.IO to
+   * @param {[String]} options.autoListStream - Collections to stream automatically. If empty, will stream no collection. If null, will stream all collections. 
    * @param {[String]} options.watch - Collections to watch. If empty, will watch all collections
    * @param {[String]} options.ignore - Collections to ignore. Can override `watch`
    *
@@ -25,16 +70,14 @@ class MongoRealtime {
     connection,
     server,
     authentify,
-    middlewares=[],
+    middlewares = [],
+    autoListStream,
     onSocket,
     offSocket,
     watch = [],
     ignore = [],
   }) {
-    if (this.io)
-      this.io.close(() => {
-        this.sockets = [];
-      });
+    if (this.io) this.io.close();
     this.io = new Server(server);
     this.connection = connection;
 
@@ -45,19 +88,18 @@ class MongoRealtime {
       if (!!authentify) {
         try {
           const token = socket.handshake.auth.token;
-          if (!token) return next(new Error("No token provided"));
+          if (!token) return next(new Error("NO_TOKEN_PROVIDED"));
 
-          const authorized =await authentify(token, socket);
-          if (authorized===true) return next(); // exactly returns true
+          const authorized = await authentify(token, socket);
+          if (authorized === true) return next(); // exactly returns true
 
-          return next(new Error("Unauthorized"));
+          return next(new Error("UNAUTHORIZED"));
         } catch (error) {
-          return next(new Error("Authentication error"));
+          return next(new Error("AUTH_ERROR"));
         }
       } else {
         return next();
       }
-      
     });
 
     for (let middleware of middlewares) {
@@ -65,16 +107,18 @@ class MongoRealtime {
     }
 
     this.io.on("connection", (socket) => {
-      this.sockets = [...this.io.sockets.sockets.values()];
       if (onSocket) onSocket(socket);
 
       socket.on("disconnect", (r) => {
-        this.sockets = [...this.io.sockets.sockets.values()];
         if (offSocket) offSocket(socket, r);
       });
     });
 
-    connection.once("open", () => {
+    connection.once("open", async () => {
+      this.collections = (await connection.listCollections()).map(
+        (c) => c.name
+      );
+
       let pipeline = [];
       if (watch.length !== 0 && ignore.length === 0) {
         pipeline = [{ $match: { "ns.coll": { $in: watch } } }];
@@ -98,7 +142,63 @@ class MongoRealtime {
         fullDocumentBeforeChange: "whenAvailable",
       });
 
-      changeStream.on("change", (change) => {
+      /** Setup main streams */
+      let collectionsToStream = [];
+      if (autoListStream == null) collectionsToStream = this.collections;
+      else collectionsToStream = this.collections.filter(c=>autoListStream.includes(c))
+      for (let col of collectionsToStream) this.addListStream(col, col);
+
+      /** Emit streams on change */
+      changeStream.on("change", async (change) => {
+        const coll = change.ns.coll;
+
+        if (!this.#cache[coll]) {
+          this.#cache[coll] = await connection.db
+            .collection(coll)
+            .find({})
+            .toArray();
+        } else
+          switch (change.operationType) {
+            case "insert":
+              this.#cache[coll].push(change.fullDocument);
+              break;
+
+            case "update":
+            case "replace":
+              this.#cache[coll] = this.#cache[coll].map((doc) =>
+                doc._id.toString() === change.documentKey._id.toString()
+                  ? change.fullDocument
+                  : doc
+              );
+              break;
+
+            case "delete":
+              this.#cache[coll] = this.#cache[coll].filter(
+                (doc) =>
+                  doc._id.toString() !== change.documentKey._id.toString()
+              );
+              break;
+          }
+
+        Object.entries(this.#streams).forEach(async (e) => {
+          const key = e[0];
+          const value = e[1];
+          if (value.collection != coll) return;
+          const filterResults = await Promise.allSettled(
+            this.#cache[coll].map((doc) => value.filter(doc))
+          );
+
+          const filtered = this.#cache[coll].filter(
+            (_, i) => filterResults[i] && filterResults[i].value
+          );
+
+          this.io.emit(`db:stream:${key}`, filtered);
+        });
+      });
+
+
+      /** Emit listen events on change */
+      changeStream.on("change", async (change) => {
         const colName = change.ns.coll.toLowerCase();
         change.col = colName;
 
@@ -154,6 +254,37 @@ class MongoRealtime {
   static listen(key, cb) {
     if (!this.#listeners[key]) this.#listeners[key] = [];
     this.#listeners[key].push(cb);
+  }
+
+  /**
+   *
+   * @param {String} streamId - StreamId of the list stream
+   * @param {String} collection - Name of the collection to stream
+   * @param { (doc:Object )=>Promise<boolean>} filter - Collection filter
+   *
+   * Register a new list stream to listen
+   */
+  static addListStream(streamId, collection, filter) {
+    if (!streamId) throw new Error("Stream id is required");
+    if (!collection) throw new Error("Collection is required");
+
+    filter ??= (_, __) => true;
+    if (this.#streams[streamId]) {
+      throw new Error(`Stream '${streamId}' already registered or is reserved.`);
+    }
+    this.#streams[streamId] = {
+      collection,
+      filter,
+    };
+  }
+
+  /**
+   * @param {String} streamId - StreamId of the stream
+   *
+   * Delete a registered stream
+   */
+  static removeListStream(streamId) {
+    delete this.#streams[streamId];
   }
 
   /**
