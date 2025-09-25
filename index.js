@@ -51,6 +51,8 @@ class MongoRealtime {
   /** @type {[String]} - All DB collections */
   static collections = [];
 
+  static #safeListStream = true;
+
   /**
    * Initializes the socket system.
    *
@@ -64,6 +66,7 @@ class MongoRealtime {
    * @param {[String]} options.autoListStream - Collections to stream automatically. If empty, will stream no collection. If null, will stream all collections.
    * @param {[String]} options.watch - Collections to watch. If empty, will watch all collections
    * @param {[String]} options.ignore - Collections to ignore. Can override `watch`
+   * @param {bool} options.safeListStream -  If true(default), declaring an existing streamId will throw an error
    *
    */
   static init({
@@ -74,12 +77,14 @@ class MongoRealtime {
     autoListStream,
     onSocket,
     offSocket,
+    safeListStream = true,
     watch = [],
     ignore = [],
   }) {
     if (this.io) this.io.close();
     this.io = new Server(server);
     this.connection = connection;
+    this.#safeListStream = !!safeListStream;
 
     watch = watch.map((s) => s.toLowerCase());
     ignore = ignore.map((s) => s.toLowerCase());
@@ -110,6 +115,20 @@ class MongoRealtime {
 
     this.io.on("connection", (socket) => {
       if (onSocket) onSocket(socket);
+
+      socket.on("db:stream[register]", async (streamId, registerId) => {
+        const stream = this.#streams[streamId];
+        if (!stream) return;
+        const coll = stream.collection;
+
+        if (!this.#cache[coll]) {
+          this.#cache[coll] = await connection.db
+            .collection(coll)
+            .find({})
+            .toArray();
+        }
+        this.io.emit(`db:stream[register][${registerId}]`, this.#cache[coll]);
+      });
 
       socket.on("disconnect", (r) => {
         if (offSocket) offSocket(socket, r);
@@ -199,7 +218,6 @@ class MongoRealtime {
 
           this.io.emit(`db:stream:${key}`, filtered);
           this.notifyListeners(`db:stream:${key}`, filtered);
-
         });
       });
 
@@ -275,7 +293,7 @@ class MongoRealtime {
     if (!collection) throw new Error("Collection is required");
 
     filter ??= (_, __) => true;
-    if (this.#streams[streamId]) {
+    if (this.#safeListStream && this.#streams[streamId]) {
       throw new Error(
         `Stream '${streamId}' already registered or is reserved.`
       );
@@ -284,7 +302,7 @@ class MongoRealtime {
       collection,
       filter,
     };
-  }
+  } 
 
   /**
    * @param {String} streamId - StreamId of the stream

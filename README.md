@@ -259,7 +259,8 @@ MongoRealtime.init({
 The server will automatically emit a list of filtered documents from the specified collections after each change.\
 Each list stream requires an unique `streamId`, the `collection` name, and an optional `filter` function that returns a boolean or a promise resolving to a boolean.
 Clients receive the list on the event `db:stream:{streamId}`.\
-For best practice, two list streams can't have the same `streamId` or else an error will be thrown. This will prevent accidental overrides. You can still remove a stream with `MongoRealtime.removeListStream(streamId)` and add it again or use inside a `try-catch` scope.
+
+On init, when `safeListStream` is `true`(default), two list streams can't have the same `streamId` or else an error will be thrown. This will prevent accidental overrides. You can still remove a stream with `MongoRealtime.removeListStream(streamId)` and add it again or use inside a `try-catch` scope.
 
 ```javascript
 MongoRealtime.init({
@@ -280,8 +281,13 @@ MongoRealtime.addListStream("usersWithEmail", "users", (doc) => !!doc.email); //
 
 When `autoListStream` is not set, all collections are automatically streamed and WITHOUT any filter.\
 That means that if you have a `posts` collection, all documents from this collection will be sent to the clients on each change.\
-And as two list streams can't have the same `streamId`, if you want to add a filtered list stream with id `posts`, you must set `autoListStream` to an array NOT containing `"posts"`or `MongoRealtime.removeListStream("posts")` after initialization.\
+
+Also, `safeListStream` is enabled by default. So, you can't add a list stream with id `posts` if `autoListStream` contains `"posts"` or is not set.\
+
+If you want to add a filtered list stream with id `posts`, you must set `autoListStream` to an array NOT containing `"posts"`or call `MongoRealtime.removeListStream("posts")` after initialization.\
 Therefore, if you want to add a filtered list stream for all collections, you must set `autoListStream` to an empty array.
+
+To avoid all these issues, you can set `safeListStream` to `false` in the init options but be careful as this will allow you to override existing streams.
 
 ```javascript
 MongoRealtime.init({
@@ -289,6 +295,14 @@ MongoRealtime.init({
   server: server,
   autoListStream: [], // stream no collection automatically (you can add your own filtered streams later)
 });
+// or
+MongoRealtime.init({
+  connection: mongoose.connection,
+  server: server,
+  safeListStream: false, // disable safe mode (you can override existing streams)
+  // Still stream all collections automatically but you can override them 
+}):
+
 MongoRealtime.addListStream("posts", "posts", (doc) => !!doc.title); // client can listen to db:stream:posts
 MongoRealtime.addListStream("users", "users", (doc) => !!doc.email); // will not throw an error
 ```
