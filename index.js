@@ -127,7 +127,14 @@ class MongoRealtime {
             .find({})
             .toArray();
         }
-        this.io.emit(`db:stream[register][${registerId}]`, this.#cache[coll]);
+        const filterResults = await Promise.allSettled(
+          this.#cache[coll].map((doc) => stream.filter(doc))
+        );
+
+        const filtered = this.#cache[coll].filter(
+          (_, i) => filterResults[i] && filterResults[i].value
+        );
+        this.io.emit(`db:stream[register][${registerId}]`, filtered);
       });
 
       socket.on("disconnect", (r) => {
@@ -302,7 +309,7 @@ class MongoRealtime {
       collection,
       filter,
     };
-  } 
+  }
 
   /**
    * @param {String} streamId - StreamId of the stream
