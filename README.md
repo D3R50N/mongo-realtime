@@ -29,18 +29,19 @@ npm install mongo-realtime
 ```javascript
 const express = require("express");
 const http = require("http");
-const mongoose = require("mongoose");
 const MongoRealtime = require("mongo-realtime");
 
 const app = express();
 const server = http.createServer(app);
 
-mongoose.connect("mongodb://localhost:27017/mydb").then((c) => {
-  console.log("Connected to db", c.connection.name);
-});
-
 MongoRealtime.init({
-  connection: mongoose.connection,
+  dbUri: "mongodb://localhost:27017/mydb",
+  onDbConnect: (conn) => {
+    console.log("Connected to db", conn.name);
+  },
+  onDbError: (err) => {
+    console.log(err.message);
+  },
   server: server,
   ignore: ["posts"], // ignore 'posts' collection
   onSocket: (socket) => {
@@ -67,17 +68,20 @@ Initializes the socket system and MongoDB Change Streams.
 
 \* means required
 
-| Parameter                | Type                    | Description                                                                      |
-| ------------------------ | ----------------------- | -------------------------------------------------------------------------------- |
-| `options.connection`     | `mongoose.Connection`\* | Active Mongoose connection                                                       |
-| `options.server`         | `http.Server`\*         | HTTP server to attach Socket.IO                                                  |
-| `options.authentify`     | `Function`              | Function to authenticate socket connections. Should return true if authenticated |
-| `options.middlewares`    | `Array[Function]`       | Array of Socket.IO middlewares                                                   |
-| `options.onSocket`       | `Function`              | Callback on socket connection                                                    |
-| `options.offSocket`      | `Function`              | Callback on socket disconnection                                                 |
-| `options.watch`          | `Array[String]`         | Collections to only watch. Listen to all when is empty                           |
-| `options.ignore`         | `Array[String]`         | Collections to only ignore. Overrides watch array                                |
-| `options.autoListStream` | `Array[String]`         | Collections to automatically stream to clients. Default is all                   |
+| Parameter                | Type              | Description                                                                      |
+| ------------------------ | ----------------- | -------------------------------------------------------------------------------- |
+| `options.dbUri`          | `String`\*        | Database URI                                                                     |
+| `options.dbOptions`      | `Object`          | Mongoose connection options                                                      |
+| `options.onDbConnect`    | `Function`        | Callback on successful database connection                                       |
+| `options.onDbError`      | `Function`        | Callback on database connection error                                            |
+| `options.server`         | `http.Server`\*   | HTTP server to attach Socket.IO                                                  |
+| `options.authentify`     | `Function`        | Function to authenticate socket connections. Should return true if authenticated |
+| `options.middlewares`    | `Array[Function]` | Array of Socket.IO middlewares                                                   |
+| `options.onSocket`       | `Function`        | Callback on socket connection                                                    |
+| `options.offSocket`      | `Function`        | Callback on socket disconnection                                                 |
+| `options.watch`          | `Array[String]`   | Collections to only watch. Listen to all when is empty                           |
+| `options.ignore`         | `Array[String]`   | Collections to only ignore. Overrides watch array                                |
+| `options.autoListStream` | `Array[String]`   | Collections to automatically stream to clients. Default is all                   |
 
 #### Static Properties and Methods
 
@@ -160,7 +164,7 @@ Each event contains the full MongoDB change object:
 
 ```javascript
 MongoRealtime.init({
-  connection: connection,
+  dbUri: "mongodb://localhost:27017/mydb",
   server: server,
   onSocket: (socket) => {
     socket.on("subscribe:users", () => {
@@ -209,7 +213,7 @@ MongoRealtime.io.to("users-room").emit("custom-event", data);
 
 ```javascript
 MongoRealtime.init({
-  connection: mongoose.connection,
+  dbUri: "mongodb://localhost:27017/mydb",
   server: server,
   onSocket: (socket) => {
     socket.on("error", (error) => {
@@ -228,6 +232,15 @@ MongoRealtime.init({
 
 ### Socket Authentication
 
+You can provide an `authentify` function in the init options to authenticate socket connections.\
+The function receives the token (from `socket.handshake.auth.token` or `socket.handshake.headers.authorization`) and the socket object.\
+When setted, it rejects connections based on this logic:
+
+- Token not provided -> error `NO_TOKEN_PROVIDED`
+- Token invalid or returns `false` -> error `UNAUTHORIZED`
+- Any other error -> error `AUTH_ERROR`
+- Return `true` to accept the connection
+
 ```javascript
 function authenticateSocket(token, socket) {
   const verify = AuthService.verifyToken(token);
@@ -239,7 +252,7 @@ function authenticateSocket(token, socket) {
 }
 
 MongoRealtime.init({
-  connection: mongoose.connection,
+  dbUri: "mongodb://localhost:27017/mydb",
   server: server,
   authentify: authenticateSocket,
   middlewares: [
@@ -264,7 +277,7 @@ On init, when `safeListStream` is `true`(default), two list streams can't have t
 
 ```javascript
 MongoRealtime.init({
-  connection: mongoose.connection,
+  dbUri: "mongodb://localhost:27017/mydb",
   server: server,
   autoListStream: ["users"], // automatically stream users collection only
 });
@@ -291,16 +304,16 @@ To avoid all these issues, you can set `safeListStream` to `false` in the init o
 
 ```javascript
 MongoRealtime.init({
-  connection: mongoose.connection,
+    dbUri: "mongodb://localhost:27017/mydb",
   server: server,
   autoListStream: [], // stream no collection automatically (you can add your own filtered streams later)
 });
 // or
 MongoRealtime.init({
-  connection: mongoose.connection,
+    dbUri: "mongodb://localhost:27017/mydb",
   server: server,
   safeListStream: false, // disable safe mode (you can override existing streams)
-  // Still stream all collections automatically but you can override them 
+  // Still stream all collections automatically but you can override them
 }):
 
 MongoRealtime.addListStream("posts", "posts", (doc) => !!doc.title); // client can listen to db:stream:posts
@@ -311,7 +324,7 @@ MongoRealtime.addListStream("users", "users", (doc) => !!doc.email); // will not
 
 ```javascript
 MongoRealtime.init({
-  connection: mongoose.connection,
+  dbUri: "mongodb://localhost:27017/mydb",
   server: server,
   authentify: (token, socket) => {
     try {
@@ -378,6 +391,8 @@ MongoRealtime.addListStream(
 ## 🐛 Troubleshooting
 
 ### MongoDB must be in Replica Set mode
+
+To use Change Streams, MongoDB must be running as a replica set. For local development, you can initiate a single-node replica set:
 
 ```bash
 mongod --replSet rs0
