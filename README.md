@@ -304,13 +304,13 @@ To avoid all these issues, you can set `safeListStream` to `false` in the init o
 
 ```javascript
 MongoRealtime.init({
-    dbUri: "mongodb://localhost:27017/mydb",
+  dbUri: "mongodb://localhost:27017/mydb",
   server: server,
   autoListStream: [], // stream no collection automatically (you can add your own filtered streams later)
 });
 // or
 MongoRealtime.init({
-    dbUri: "mongodb://localhost:27017/mydb",
+  dbUri: "mongodb://localhost:27017/mydb",
   server: server,
   safeListStream: false, // disable safe mode (you can override existing streams)
   // Still stream all collections automatically but you can override them
