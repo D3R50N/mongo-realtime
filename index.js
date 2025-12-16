@@ -35,17 +35,19 @@ class MongoRealtime {
     mongoose.connection;
   /** @type {Record<String, [(change:ChangeStreamDocument)=>void]>} */ static #listeners =
     {};
-  /** @type {Record<String, [Object]>} */
-  static #cache = {};
+  
   static sockets = () => [...this.io.sockets.sockets.values()];
 
   /**@type {Record<String, {collection:String,filter: (doc:Object)=>Promise<boolean>}>} */
   static #streams = {};
 
+  /**@type {Record<String, {expiration:Date,result:Record<String,{}> }>} */
+  static #data = {};
+
   /** @type {[String]} - All DB collections */
   static collections = [];
 
-  static #safeListStream = true;
+  static #debug = false;
 
   static version = version;
 
@@ -69,7 +71,7 @@ class MongoRealtime {
     const text = `[REALTIME] ${message}`;
     switch (type) {
       case 1:
-        console.log(chalk.bold.hex('#11AA60FF')(text));
+        console.log(chalk.bold.hex("#11AA60FF")(text));
         break;
       case 2:
         console.log(chalk.bold.bgHex("#257993")(text));
@@ -81,10 +83,18 @@ class MongoRealtime {
         console.log(chalk.bold.red(text));
         break;
 
+      case 5:
+        console.log(chalk.italic(text));
+        break;
+
       default:
         console.log(text);
         break;
     }
+  }
+
+  static #debugLog(message) {
+    if (this.#debug) this.#log("[DEBUG] " + message, 5);
   }
 
   /**
@@ -100,10 +110,10 @@ class MongoRealtime {
    * @param {(socket: import("socket.io").Socket) => void} options.onSocket - Callback triggered when a socket connects
    * @param {(socket: import("socket.io").Socket, reason: import("socket.io").DisconnectReason) => void} options.offSocket - Callback triggered when a socket disconnects
    * @param {import("http").Server} options.server - HTTP server to attach Socket.IO to
-   * @param {[String]} options.autoListStream - Collections to stream automatically. If empty, will stream no collection. If null, will stream all collections.
+   * @param {[String]} options.autoStream - Collections to stream automatically. If empty, will stream no collection. If null, will stream all collections.
    * @param {[String]} options.watch - Collections to watch. If empty, will watch all collections
    * @param {[String]} options.ignore - Collections to ignore. Can override `watch`
-   * @param {bool} options.safeListStream -  If true(default), declaring an existing streamId will throw an error
+   * @param {bool} options.debug -  Enable debug mode
    *
    */
   static async init({
@@ -115,22 +125,28 @@ class MongoRealtime {
     authentify,
     onSocket,
     offSocket,
-    safeListStream = true,
-    autoListStream,
+    debug = false,
+    autoStream,
     middlewares = [],
     watch = [],
     ignore = [],
   }) {
-    console.clear();
     this.#log(`MongoRealtime version (${this.version})`, 2);
+
     if (this.io) this.io.close();
     this.#check(() => dbUri);
     this.#check(() => server);
+    this.#debug = debug;
 
     this.io = new Server(server);
     this.connection.once("open", async () => {
       this.collections = (await this.connection.listCollections()).map(
         (c) => c.name
+      );
+      this.#debugLog(
+        `${this.collections.length} collections found : ${this.collections.join(
+          ", "
+        )}`
       );
 
       let pipeline = [];
@@ -158,70 +174,56 @@ class MongoRealtime {
 
       /** Setup main streams */
       let collectionsToStream = [];
-      if (autoListStream == null) collectionsToStream = this.collections;
+      if (autoStream == null) collectionsToStream = this.collections;
       else
         collectionsToStream = this.collections.filter((c) =>
-          autoListStream.includes(c)
+          autoStream.includes(c)
         );
-      for (let col of collectionsToStream) this.addListStream(col, col);
-
-      /** Emit streams on change */
-      changeStream.on("change", async (change) => {
-        const coll = change.ns.coll;
-
-        if (!this.#cache[coll]) {
-          this.#cache[coll] = await this.connection.db
-            .collection(coll)
-            .find({})
-            .sort({ _id: -1 })
-            .toArray();
-        } else
-          switch (change.operationType) {
-            case "insert":
-              this.#cache[coll].unshift(change.fullDocument); // add to top;
-              break;
-
-            case "update":
-            case "replace":
-              this.#cache[coll] = this.#cache[coll].map((doc) =>
-                doc._id.toString() === change.documentKey._id.toString()
-                  ? change.fullDocument
-                  : doc
-              );
-              break;
-
-            case "delete":
-              this.#cache[coll] = this.#cache[coll].filter(
-                (doc) =>
-                  doc._id.toString() !== change.documentKey._id.toString()
-              );
-              break;
-          }
-
-        Object.entries(this.#streams).forEach(async (e) => {
-          const key = e[0];
-          const value = e[1];
-          if (value.collection != coll) return;
-          const filterResults = await Promise.allSettled(
-            this.#cache[coll].map((doc) => value.filter(doc))
-          );
-
-          const filtered = this.#cache[coll].filter(
-            (_, i) => filterResults[i] && filterResults[i].value
-          );
-
-          this.io.emit(`db:stream:${key}`, filtered);
-          this.notifyListeners(`db:stream:${key}`, filtered);
-        });
-      });
+      for (let col of collectionsToStream) this.addStream(col, col);
+      this.#debugLog(
+        `Auto stream on collections  : ${collectionsToStream.join(", ")}`
+      );
 
       /** Emit listen events on change */
       changeStream.on("change", async (change) => {
-        const colName = change.ns.coll.toLowerCase();
+        const coll = change.ns.coll;
+        const colName = coll.toLowerCase();
+        const doc = change.fullDocument;
+
+        this.#debugLog(`Collection '${colName}' changed`);
+
         change.col = colName;
 
         const type = change.operationType;
-        const id = change.documentKey?._id;
+        const id = change.documentKey?._id.toString();
+
+        for (const k in this.#streams) {
+          const stream = this.#streams[k];
+          if (stream.collection != coll) continue;
+
+          Promise.resolve(stream.filter(doc)).then((ok) => {
+            if (ok) {
+              this.io.emit(`realtime:${k}`, {
+                results: [doc],
+                coll: coll,
+                count: 1,
+                total: 1,
+                remaining: 0,
+              });
+            }
+          });
+        }
+        for (let k in this.#data) {
+          if (!k.startsWith(`${coll}-`) || !this.#data[k].result[id]) continue;
+          doc._id = doc._id.toString();
+          switch (change.operationType) {
+            case "delete":
+              delete this.#data[k].result[id];
+              break;
+            default:
+              this.#data[k].result[id] = doc;
+          }
+        }
 
         const e_change = "db:change";
         const e_change_type = `db:${type}`;
@@ -254,13 +256,11 @@ class MongoRealtime {
       onDbConnect?.call(this, mongoose.connection);
     } catch (error) {
       onDbError?.call(this, error);
-      this.#log("Failed to init",4);
+      this.#log("Failed to init", 4);
       return;
     }
 
     this.#check(() => mongoose.connection.db, "No database found");
-
-    this.#safeListStream = !!safeListStream;
 
     watch = watch.map((s) => s.toLowerCase());
     ignore = ignore.map((s) => s.toLowerCase());
@@ -291,37 +291,121 @@ class MongoRealtime {
 
     this.io.on("connection", (socket) => {
       socket.emit("version", version);
-      socket.on("db:stream[register]", async (streamId, registerId) => {
-        const stream = this.#streams[streamId];
-        if (!stream) return;
-        const coll = stream.collection;
-        if (!this.#cache[coll]) {
-          this.#cache[coll] = await this.connection.db
-            .collection(coll)
-            .find({})
-            .sort({ _id: -1 })
-            .toArray();
-        }
-        const filterResults = await Promise.allSettled(
-          this.#cache[coll].map((doc) => stream.filter(doc))
-        );
 
-        const filtered = this.#cache[coll].filter(
-          (_, i) => filterResults[i] && filterResults[i].value
-        );
-        this.io.emit(`db:stream[register][${registerId}]`, filtered);
-      });
+      socket.on(
+        "realtime",
+        async ({ streamId, limit, reverse, registerId }) => {
+          if (!streamId || !this.#streams[streamId]) return;
+
+          const stream = this.#streams[streamId];
+          const coll = stream.collection;
+
+          const default_limit = 50;
+          limit ??= default_limit;
+          try {
+            limit = parseInt(limit);
+          } catch (_) {
+            limit = default_limit;
+          }
+
+          reverse = reverse == true;
+          registerId ??= "";
+          this.#debugLog(
+            `Socket ${socket.id} registred for realtime '${coll}:${registerId}'. Limit ${limit}. Reversed ${reverse}`
+          );
+
+          let total;
+          const ids = [];
+
+          do {
+            total = await this.connection.db
+              .collection(coll)
+              .estimatedDocumentCount();
+
+            const length = ids.length;
+            const range = [length, Math.min(total, length + limit)];
+            const now = new Date();
+
+            let cachedKey = `${coll}-${range}`;
+
+            let cachedResult = this.#data[cachedKey];
+            if (cachedResult && cachedResult.expiration < now) {
+              delete this.#data[cachedKey];
+            }
+
+            cachedResult = this.#data[cachedKey];
+
+            const result = cachedResult
+              ? Object.values(cachedResult.result)
+              : await this.connection.db
+                  .collection(coll)
+                  .find({
+                    _id: {
+                      $nin: ids,
+                    },
+                  })
+                  .limit(limit)
+                  .sort({ _id: reverse ? -1 : 1 })
+                  .toArray();
+
+            ids.push(...result.map((d) => d._id));
+
+            const delayInMin = 1;
+            const expiration = new Date(now.getTime() + delayInMin * 60 * 1000);
+            const resultMap = result.reduce((acc, item) => {
+              item._id = item._id.toString();
+              acc[item._id] = item;
+              return acc;
+            }, {});
+
+            if (!cachedResult) {
+              this.#data[cachedKey] = {
+                expiration,
+                result: resultMap,
+              };
+            }
+
+            const filtered = (
+              await Promise.all(
+                result.map(async (doc) => {
+                  try {
+                    return {
+                      doc,
+                      ok: await stream.filter(doc),
+                    };
+                  } catch (e) {
+                    return {
+                      doc,
+                      ok: false,
+                    };
+                  }
+                })
+              )
+            )
+              .filter((item) => item.ok)
+              .map((item) => item.doc);
+
+            const data = {
+              results: filtered,
+              coll,
+              count: filtered.length,
+              total,
+              remaining: total - ids.length,
+            };
+
+            socket.emit(`realtime:${streamId}:${registerId}`, data);
+          } while (ids.length < total);
+        }
+      );
 
       socket.on("disconnect", (r) => {
         if (offSocket) offSocket(socket, r);
       });
 
       if (onSocket) onSocket(socket);
-
     });
-    
 
-    this.#log(`Initialized`,1);
+    this.#log(`Initialized`, 1);
   }
 
   /**
@@ -357,16 +441,14 @@ class MongoRealtime {
    *
    * Register a new list stream to listen
    */
-  static addListStream(streamId, collection, filter) {
+  static addStream(streamId, collection, filter) {
     if (!streamId) throw new Error("Stream id is required");
     if (!collection) throw new Error("Collection is required");
+    if (this.#streams[streamId] && this.collections.includes(streamId))
+      throw new Error(`streamId '${streamId}' cannot be a collection`);
 
     filter ??= (_, __) => true;
-    if (this.#safeListStream && this.#streams[streamId]) {
-      throw new Error(
-        `Stream '${streamId}' already registered or is reserved.`
-      );
-    }
+
     this.#streams[streamId] = {
       collection,
       filter,
@@ -378,7 +460,7 @@ class MongoRealtime {
    *
    * Delete a registered stream
    */
-  static removeListStream(streamId) {
+  static removeStream(streamId) {
     delete this.#streams[streamId];
   }
 
