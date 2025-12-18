@@ -35,7 +35,7 @@ class MongoRealtime {
     mongoose.connection;
   /** @type {Record<String, [(change:ChangeStreamDocument)=>void]>} */ static #listeners =
     {};
-  
+
   static sockets = () => [...this.io.sockets.sockets.values()];
 
   /**@type {Record<String, {collection:String,filter: (doc:Object)=>Promise<boolean>}>} */
@@ -114,6 +114,8 @@ class MongoRealtime {
    * @param {[String]} options.watch - Collections to watch. If empty, will watch all collections
    * @param {[String]} options.ignore - Collections to ignore. Can override `watch`
    * @param {bool} options.debug -  Enable debug mode
+   * @param {number} options.cacheDelay - Cache delay in minutes. Put 0 if no cache
+   * @param {number} options.allowDbOperations - If true, you can use find and update operations.
    *
    */
   static async init({
@@ -130,6 +132,8 @@ class MongoRealtime {
     middlewares = [],
     watch = [],
     ignore = [],
+    cacheDelay = 5,
+    allowDbOperations = true,
   }) {
     this.#log(`MongoRealtime version (${this.version})`, 2);
 
@@ -350,7 +354,7 @@ class MongoRealtime {
 
             ids.push(...result.map((d) => d._id));
 
-            const delayInMin = 1;
+            const delayInMin = cacheDelay;
             const expiration = new Date(now.getTime() + delayInMin * 60 * 1000);
             const resultMap = result.reduce((acc, item) => {
               item._id = item._id.toString();
@@ -397,6 +401,95 @@ class MongoRealtime {
           } while (ids.length < total);
         }
       );
+      if (allowDbOperations) {
+        socket.on("realtime:count", async ({ coll, query }, ack) => {
+          if (!coll) return ack(0);
+          query ??= {};
+          const c = this.connection.db.collection(coll);
+          const hasQuery = notEmpty(query);
+          const count = hasQuery
+            ? await c.countDocuments(query)
+            : await c.estimatedDocumentCount();
+          ack(count);
+        });
+
+        socket.on(
+          "realtime:find",
+          async (
+            { coll, query, limit, sortBy, project, one, skip, id },
+            ack
+          ) => {
+            if (!coll) return ack(null);
+            const c = this.connection.db.collection(coll);
+
+            if (id) {
+              ack(await c.findOne({ _id: toObjectId(id) }));
+              return;
+            }
+
+            query ??= {};
+            one = one == true;
+
+            if (query["_id"]) {
+              query["_id"] = toObjectId(query["_id"]);
+            }
+
+            const options = {
+              sort: sortBy,
+              projection: project,
+              skip: skip,
+              limit: limit,
+            };
+
+            if (one) {
+              ack(await c.findOne(query, options));
+              return;
+            }
+
+            let cursor = c.find(query, options);
+            ack(await cursor.toArray());
+          }
+        );
+
+        socket.on(
+          "realtime:update",
+          async (
+            { coll, query, limit, sortBy, project, one, skip, id, update },
+            ack
+          ) => {
+
+            if (!coll || !notEmpty(update)) return ack(0);
+            const c = this.connection.db.collection(coll);
+
+            if (id) {  
+              ack((await c.updateOne({ _id: toObjectId(id) }, update)).modifiedCount);
+              return;
+            }
+
+            query ??= {};
+            one = one == true;
+
+            if (query["_id"]) {
+              query["_id"] = toObjectId(query["_id"]);
+            }
+
+            const options = {
+              sort: sortBy,
+              projection: project,
+              skip: skip,
+              limit: limit,
+            };
+
+            if (one) {
+              ack((await c.updateOne(query,update, options)).modifiedCount);
+              return;
+            }
+
+            let cursor = await c.updateMany(query,update, options);
+            ack(cursor.modifiedCount);
+          }
+        );
+      }
 
       socket.on("disconnect", (r) => {
         if (offSocket) offSocket(socket, r);
@@ -480,6 +573,21 @@ class MongoRealtime {
    */
   static removeAllListeners() {
     this.#listeners = {};
+  }
+}
+
+// utils
+function notEmpty(obj) {
+  obj ??= {};
+  return Object.keys(obj).length > 0;
+}
+/** @param {String} id  */
+function toObjectId(id) {
+  if (typeof id != "string") return id;
+  try {
+    return mongoose.Types.ObjectId.createFromHexString(id);
+  } catch (_) {
+    return new mongoose.Types.ObjectId(id); //use deprecated if fail
   }
 }
 
