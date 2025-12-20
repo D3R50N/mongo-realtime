@@ -192,14 +192,15 @@ class MongoRealtime {
       changeStream.on("change", async (change) => {
         const coll = change.ns.coll;
         const colName = coll.toLowerCase();
-        const doc = change.fullDocument;
+        const id = change.documentKey?._id.toString();
+        const doc = change.fullDocument??{_id:id};
+        
 
         this.#debugLog(`Collection '${colName}' changed`);
 
         change.col = colName;
 
         const type = change.operationType;
-        const id = change.documentKey?._id.toString();
 
         for (const k in this.#streams) {
           const stream = this.#streams[k];
@@ -207,24 +208,23 @@ class MongoRealtime {
 
           Promise.resolve(stream.filter(doc)).then((ok) => {
             if (ok) {
-              this.io.emit(`realtime:${k}`, {
-                results: [doc],
-                coll: coll,
-                count: 1,
-                total: 1,
-                remaining: 0,
-              });
+              const data = { added: [], removed: [] };
+              if (change.operationType == "delete") data.removed.push(doc);
+              else data.added.push(doc);
+
+
+              this.io.emit(`realtime:${k}`, data);
             }
           });
         }
         for (let k in this.#data) {
           if (!k.startsWith(`${coll}-`) || !this.#data[k].result[id]) continue;
-          doc._id = doc._id.toString();
           switch (change.operationType) {
             case "delete":
               delete this.#data[k].result[id];
               break;
-            default:
+              default:
+              doc._id = id;
               this.#data[k].result[id] = doc;
           }
         }
@@ -326,6 +326,7 @@ class MongoRealtime {
               .collection(coll)
               .estimatedDocumentCount();
 
+
             const length = ids.length;
             const range = [length, Math.min(total, length + limit)];
             const now = new Date();
@@ -390,11 +391,8 @@ class MongoRealtime {
               .map((item) => item.doc);
 
             const data = {
-              results: filtered,
-              coll,
-              count: filtered.length,
-              total,
-              remaining: total - ids.length,
+              added: filtered,
+              removed: [],
             };
 
             socket.emit(`realtime:${streamId}:${registerId}`, data);
@@ -457,12 +455,14 @@ class MongoRealtime {
             { coll, query, limit, sortBy, project, one, skip, id, update },
             ack
           ) => {
-
             if (!coll || !notEmpty(update)) return ack(0);
             const c = this.connection.db.collection(coll);
 
-            if (id) {  
-              ack((await c.updateOne({ _id: toObjectId(id) }, update)).modifiedCount);
+            if (id) {
+              ack(
+                (await c.updateOne({ _id: toObjectId(id) }, update))
+                  .modifiedCount
+              );
               return;
             }
 
@@ -481,11 +481,11 @@ class MongoRealtime {
             };
 
             if (one) {
-              ack((await c.updateOne(query,update, options)).modifiedCount);
+              ack((await c.updateOne(query, update, options)).modifiedCount);
               return;
             }
 
-            let cursor = await c.updateMany(query,update, options);
+            let cursor = await c.updateMany(query, update, options);
             ack(cursor.modifiedCount);
           }
         );
