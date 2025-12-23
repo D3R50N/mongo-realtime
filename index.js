@@ -63,7 +63,7 @@ class MongoRealtime {
 
       const expr = err ?? (match ? match[1].trim() : src);
 
-      throw new Error(`MongoRealtime failed to check "${expr}"`);
+      throw new Error(`MongoRealtime expects "${expr}"`);
     }
   }
 
@@ -116,12 +116,15 @@ class MongoRealtime {
    * @param {bool} options.debug -  Enable debug mode
    * @param {number} options.cacheDelay - Cache delay in minutes. Put 0 if no cache
    * @param {number} options.allowDbOperations - If true, you can use find and update operations.
+   * @param {mongoose} options.mongooseInstance - Running mongoose instance
+   *
    *
    */
   static async init({
     dbUri,
     dbOptions,
     server,
+    mongooseInstance,
     onDbConnect,
     onDbError,
     authentify,
@@ -193,41 +196,13 @@ class MongoRealtime {
         const coll = change.ns.coll;
         const colName = coll.toLowerCase();
         const id = change.documentKey?._id.toString();
-        const doc = change.fullDocument??{_id:id};
-        
+        const doc = change.fullDocument ?? { _id: id };
 
         this.#debugLog(`Collection '${colName}' changed`);
 
         change.col = colName;
 
         const type = change.operationType;
-
-        for (const k in this.#streams) {
-          const stream = this.#streams[k];
-          if (stream.collection != coll) continue;
-
-          Promise.resolve(stream.filter(doc)).then((ok) => {
-            if (ok) {
-              const data = { added: [], removed: [] };
-              if (change.operationType == "delete") data.removed.push(doc);
-              else data.added.push(doc);
-
-
-              this.io.emit(`realtime:${k}`, data);
-            }
-          });
-        }
-        for (let k in this.#data) {
-          if (!k.startsWith(`${coll}-`) || !this.#data[k].result[id]) continue;
-          switch (change.operationType) {
-            case "delete":
-              delete this.#data[k].result[id];
-              break;
-              default:
-              doc._id = id;
-              this.#data[k].result[id] = doc;
-          }
-        }
 
         const e_change = "db:change";
         const e_change_type = `db:${type}`;
@@ -251,12 +226,39 @@ class MongoRealtime {
           this.io.emit(e, change);
           this.notifyListeners(e, change);
         }
+
+        for (const k in this.#streams) {
+          const stream = this.#streams[k];
+          if (stream.collection != coll) continue;
+
+          Promise.resolve(stream.filter(doc)).then((ok) => {
+            if (ok) {
+              const data = { added: [], removed: [] };
+              if (change.operationType == "delete") data.removed.push(doc);
+              else data.added.push(doc);
+
+              this.io.emit(`realtime:${k}`, data);
+            }
+          });
+        }
+        for (let k in this.#data) {
+          if (!k.startsWith(`${coll}-`) || !this.#data[k].result[id]) continue;
+          switch (change.operationType) {
+            case "delete":
+              delete this.#data[k].result[id];
+              break;
+            default:
+              doc._id = id;
+              this.#data[k].result[id] = doc;
+          }
+        }
       });
     });
 
     try {
       await mongoose.connect(dbUri, dbOptions);
       this.#log(`Connected to db '${mongoose.connection.name}'`, 1);
+      if (mongooseInstance) mongooseInstance.connection = mongoose.connection;
       onDbConnect?.call(this, mongoose.connection);
     } catch (error) {
       onDbError?.call(this, error);
@@ -303,8 +305,8 @@ class MongoRealtime {
 
           const stream = this.#streams[streamId];
           const coll = stream.collection;
-
-          const default_limit = 50;
+ 
+          const default_limit = 100;
           limit ??= default_limit;
           try {
             limit = parseInt(limit);
@@ -315,7 +317,7 @@ class MongoRealtime {
           reverse = reverse == true;
           registerId ??= "";
           this.#debugLog(
-            `Socket ${socket.id} registred for realtime '${coll}:${registerId}'. Limit ${limit}. Reversed ${reverse}`
+            `Socket '${socket.id}' registred for realtime '${coll}:${registerId}'. Limit ${limit}. Reversed ${reverse}`
           );
 
           let total;
@@ -325,7 +327,6 @@ class MongoRealtime {
             total = await this.connection.db
               .collection(coll)
               .estimatedDocumentCount();
-
 
             const length = ids.length;
             const range = [length, Math.min(total, length + limit)];

@@ -51,17 +51,19 @@ MongoRealtime.init({
   offSocket: (socket, reason) => {
     console.log(`Client disconnected: ${socket.id}, reason: ${reason}`);
   },
+}).then(() => {
+  // It's better to start the server after the db connection is established
+  server.listen(3000, () => {
+    console.log("Server listening on port 3000");
+  });
 });
 
-server.listen(3000, () => {
-  console.log("Server started on port 3000");
-});
 ```
 
 ## Breaking Changes since v2.x.x
 
 In older versions, streams receive all documents and send them to sockets. This can lead to performance issues with large collections.\
-From version 2.x.x, streams now require a limit (default 50 documents) from the client side to avoid overloading the server and network.\
+From version 2.x.x, streams now require a limit (default 100 documents) from the client side to avoid overloading the server and network.\
 Receiving streamed docs now works like this:
 
 ```javascript
