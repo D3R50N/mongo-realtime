@@ -41,7 +41,7 @@ class MongoRealtime {
   /**@type {Record<String, {collection:String,filter: (doc:Object)=>Promise<boolean>}>} */
   static #streams = {};
 
-  /**@type {Record<String, {expiration:Date,result:Record<String,{}> }>} */
+  /**@type {Record<String, Record<String,{}>>} */
   static #data = {};
 
   /** @type {[String]} - All DB collections */
@@ -50,6 +50,13 @@ class MongoRealtime {
   static #debug = false;
 
   static version = version;
+
+  static #resolvePromise;
+  static #rejectPromise;
+
+  static get(coll) {
+    return Object.values(this.#data[coll] ?? {});
+  }
 
   static #check(fn, err) {
     const result = fn();
@@ -138,6 +145,11 @@ class MongoRealtime {
     cacheDelay = 5,
     allowDbOperations = true,
   }) {
+    const promise = new Promise((resolve, reject) => {
+      this.#resolvePromise = resolve;
+      this.#rejectPromise = reject;
+    });
+
     this.#log(`MongoRealtime version (${this.version})`, 2);
 
     if (this.io) this.io.close();
@@ -148,12 +160,12 @@ class MongoRealtime {
     this.io = new Server(server);
     this.connection.once("open", async () => {
       this.collections = (await this.connection.listCollections()).map(
-        (c) => c.name
+        (c) => c.name,
       );
       this.#debugLog(
         `${this.collections.length} collections found : ${this.collections.join(
-          ", "
-        )}`
+          ", ",
+        )}`,
       );
 
       let pipeline = [];
@@ -184,11 +196,11 @@ class MongoRealtime {
       if (autoStream == null) collectionsToStream = this.collections;
       else
         collectionsToStream = this.collections.filter((c) =>
-          autoStream.includes(c)
+          autoStream.includes(c),
         );
       for (let col of collectionsToStream) this.addStream(col, col);
       this.#debugLog(
-        `Auto stream on collections  : ${collectionsToStream.join(", ")}`
+        `Auto stream on collections  : ${collectionsToStream.join(", ")}`,
       );
 
       /** Emit listen events on change */
@@ -241,18 +253,17 @@ class MongoRealtime {
             }
           });
         }
-        for (let k in this.#data) {
-          if (!k.startsWith(`${coll}-`) || !this.#data[k].result[id]) continue;
-          switch (change.operationType) {
-            case "delete":
-              delete this.#data[k].result[id];
-              break;
-            default:
-              doc._id = id;
-              this.#data[k].result[id] = doc;
-          }
+        switch (change.operationType) {
+          case "delete":
+            delete this.#data[coll][id];
+            break;
+          default:
+            doc._id = id;
+            this.#data[coll][id] = doc;
         }
       });
+
+      this.#getAllData();
     });
 
     try {
@@ -305,100 +316,43 @@ class MongoRealtime {
 
           const stream = this.#streams[streamId];
           const coll = stream.collection;
- 
-          const default_limit = 100;
-          limit ??= default_limit;
-          try {
-            limit = parseInt(limit);
-          } catch (_) {
-            limit = default_limit;
-          }
+          const data = this.#data[coll];
 
-          reverse = reverse == true;
           registerId ??= "";
-          this.#debugLog(
-            `Socket '${socket.id}' registred for realtime '${coll}:${registerId}'. Limit ${limit}. Reversed ${reverse}`
-          );
+          // this.#debugLog(
+          //   `Socket '${socket.id}' registred for realtime '${coll}:${registerId}'. Limit ${limit}. Reversed ${reverse}`,
+          // );
 
-          let total;
-          const ids = [];
+          let result = Object.values(data);
 
-          do {
-            total = await this.connection.db
-              .collection(coll)
-              .estimatedDocumentCount();
-
-            const length = ids.length;
-            const range = [length, Math.min(total, length + limit)];
-            const now = new Date();
-
-            let cachedKey = `${coll}-${range}`;
-
-            let cachedResult = this.#data[cachedKey];
-            if (cachedResult && cachedResult.expiration < now) {
-              delete this.#data[cachedKey];
-            }
-
-            cachedResult = this.#data[cachedKey];
-
-            const result = cachedResult
-              ? Object.values(cachedResult.result)
-              : await this.connection.db
-                  .collection(coll)
-                  .find({
-                    _id: {
-                      $nin: ids,
-                    },
-                  })
-                  .limit(limit)
-                  .sort({ _id: reverse ? -1 : 1 })
-                  .toArray();
-
-            ids.push(...result.map((d) => d._id));
-
-            const delayInMin = cacheDelay;
-            const expiration = new Date(now.getTime() + delayInMin * 60 * 1000);
-            const resultMap = result.reduce((acc, item) => {
-              item._id = item._id.toString();
-              acc[item._id] = item;
-              return acc;
-            }, {});
-
-            if (!cachedResult) {
-              this.#data[cachedKey] = {
-                expiration,
-                result: resultMap,
-              };
-            }
-
-            const filtered = (
-              await Promise.all(
-                result.map(async (doc) => {
-                  try {
-                    return {
-                      doc,
-                      ok: await stream.filter(doc),
-                    };
-                  } catch (e) {
-                    return {
-                      doc,
-                      ok: false,
-                    };
-                  }
-                })
-              )
+          const filtered = (
+            await Promise.all(
+              result.map(async (doc) => {
+                try {
+                  return {
+                    doc,
+                    ok: await stream.filter(doc),
+                  };
+                } catch (e) {
+                  return {
+                    doc,
+                    ok: false,
+                  };
+                }
+              }),
             )
-              .filter((item) => item.ok)
-              .map((item) => item.doc);
+          )
+            .filter((item) => item.ok)
+            .map((item) => item.doc);
 
-            const data = {
-              added: filtered,
+          limit ??= filtered.length;
+          for (let i = 0; i < filtered.length; i += limit) {
+            socket.emit(`realtime:${streamId}:${registerId}`, {
+              added: filtered.slice(i, i + limit),
               removed: [],
-            };
-
-            socket.emit(`realtime:${streamId}:${registerId}`, data);
-          } while (ids.length < total);
-        }
+            });
+          }
+        },
       );
       if (allowDbOperations) {
         socket.on("realtime:count", async ({ coll, query }, ack) => {
@@ -416,7 +370,7 @@ class MongoRealtime {
           "realtime:find",
           async (
             { coll, query, limit, sortBy, project, one, skip, id },
-            ack
+            ack,
           ) => {
             if (!coll) return ack(null);
             const c = this.connection.db.collection(coll);
@@ -447,14 +401,14 @@ class MongoRealtime {
 
             let cursor = c.find(query, options);
             ack(await cursor.toArray());
-          }
+          },
         );
 
         socket.on(
           "realtime:update",
           async (
             { coll, query, limit, sortBy, project, one, skip, id, update },
-            ack
+            ack,
           ) => {
             if (!coll || !notEmpty(update)) return ack(0);
             const c = this.connection.db.collection(coll);
@@ -462,7 +416,7 @@ class MongoRealtime {
             if (id) {
               ack(
                 (await c.updateOne({ _id: toObjectId(id) }, update))
-                  .modifiedCount
+                  .modifiedCount,
               );
               return;
             }
@@ -488,7 +442,7 @@ class MongoRealtime {
 
             let cursor = await c.updateMany(query, update, options);
             ack(cursor.modifiedCount);
-          }
+          },
         );
       }
 
@@ -499,7 +453,7 @@ class MongoRealtime {
       if (onSocket) onSocket(socket);
     });
 
-    this.#log(`Initialized`, 1);
+    return promise;
   }
 
   /**
@@ -513,6 +467,27 @@ class MongoRealtime {
       for (let c of this.#listeners[e]) {
         c(change);
       }
+    }
+  }
+
+  static #getAllData() {
+    const total = this.collections.length;
+    for (let coll of this.collections) {
+      this.connection.db
+        .collection(coll)
+        .find()
+        .toArray()
+        .then((r) => {
+          this.#data[coll] = r.reduce((acc, doc) => {
+            acc[doc._id] = doc;
+            return acc;
+          }, {});
+
+          if (Object.keys(this.#data).length == total) {
+            this.#log(`Initialized`, 1);
+            this.#resolvePromise(this.#data);
+          }
+        });
     }
   }
 
