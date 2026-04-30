@@ -1,0 +1,62 @@
+"use strict";
+
+const dotenv = require("dotenv");
+
+let loaded = false;
+
+/**
+ * Loads environment variables from `.env` once for the current process.
+ */
+function loadEnvironment() {
+  if (!loaded) {
+    dotenv.config();
+    loaded = true;
+  }
+}
+
+/**
+ * Resolves runtime options from explicit overrides first, then environment variables.
+ *
+ * @param {object} [overrides={}] Explicit runtime overrides.
+ * @param {string} [overrides.host] Host used when this package owns the HTTP server.
+ * @param {number} [overrides.port] Port used when this package owns the HTTP server.
+ * @param {string} [overrides.path] WebSocket upgrade path.
+ * @param {string} [overrides.mongoUri] MongoDB connection URI.
+ * @param {string} [overrides.dbName] MongoDB database name.
+ * @returns {{host: string, port: number, path: string, mongoUri: string, dbName: string}}
+ */
+function readEnvironmentOptions(overrides = {}) {
+  loadEnvironment();
+
+  return {
+    host: overrides.host || process.env.HOST || "0.0.0.0",
+    port: normalizePort(overrides.port || process.env.PORT || 3000),
+    path: overrides.path || process.env.WS_PATH || "/",
+    mongoUri:
+      overrides.mongoUri ||
+      process.env.MONGODB_URI ||
+      process.env.MONGO_URI ||
+      "mongodb://127.0.0.1:27017",
+    dbName:
+      overrides.dbName ||
+      process.env.MONGODB_DB_NAME ||
+      process.env.MONGO_DB ||
+      "mongo_realtime_test",
+  };
+}
+
+/**
+ * Normalizes a port value into a valid non-negative integer.
+ *
+ * @param {unknown} value Candidate port value.
+ * @returns {number}
+ */
+function normalizePort(value) {
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 0 ? port : 3000;
+}
+
+module.exports = {
+  loadEnvironment,
+  readEnvironmentOptions,
+};

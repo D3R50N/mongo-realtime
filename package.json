@@ -1,8 +1,11 @@
 {
   "name": "mongo-realtime",
-  "version": "2.0.4",
-  "main": "index.js",
+  "version": "3.0.0",
+  "main": "src/index.js",
   "scripts": {},
+  "exports": {
+    ".": "./src/index.js"
+  },
   "keywords": [
     "mongo",
     "mongoose",
@@ -11,17 +14,26 @@
     "realtime",
     "mongodb",
     "socket",
+    "websocket",
+    "flutter",
+    "server",
     "db"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    ".env.example"
   ],
   "author": "D3R50N",
   "license": "MIT",
   "repository": {
     "url": "git+https://github.com/D3R50N/mongo-realtime.git"
   },
-  "description": "A Node.js package that combines Socket.IO and MongoDB Change Streams to deliver real-time database updates to your WebSocket clients.",
+  "description": "A Node.js package that combines WebSockets and MongoDB Change Streams to deliver real-time database updates to your WebSocket clients.",
   "dependencies": {
     "chalk": "^4.1.2",
-    "mongoose": "^8.17.0",
-    "socket.io": "^4.8.1"
+    "dotenv": "^17.4.2",
+    "mongodb": "^7.2.0",
+    "ws": "^8.20.0"
   }
 }
