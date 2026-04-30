@@ -11,14 +11,14 @@ class MongoRealtime {
    * Initializes the socket system.
    *
    * @param {Object} options
-   * @param {import("mongoose").Connection} options.connection - Active Mongoose connection
-   * @param {(token:String, socket: import("socket.io").Socket) => boolean | Promise<boolean>} options.authentify - Auth function that should return true if `token` is valid
-   * @param {[( socket: import("socket.io").Socket, next: (err?: ExtendedError) => void) => void]} options.middlewares - Register mmiddlewares on incoming socket
-   * @param {(socket: import("socket.io").Socket) => void} options.onSocket - Callback triggered when a socket connects
-   * @param {(socket: import("socket.io").Socket, reason: import("socket.io").DisconnectReason) => void} options.offSocket - Callback triggered when a socket disconnects
-   * @param {import("http").Server} options.server - HTTP server to attach Socket.IO to
-   * @param {[String]} options.watch - Collections to watch. If empty, will watch all collections
-   * @param {[String]} options.ignore - Collections to ignore. Can override `watch`
+   * @param {import("mongoose").Connection} options.connection Active Mongoose connection
+   * @param {(token:String, socket: import("socket.io").Socket) => boolean | Promise<boolean>} options.authentify Auth function that should return true if `token` is valid
+   * @param {[( socket: import("socket.io").Socket, next: (err?: ExtendedError) => void) => void]} options.middlewares Register mmiddlewares on incoming socket
+   * @param {(socket: import("socket.io").Socket) => void} options.onSocket Callback triggered when a socket connects
+   * @param {(socket: import("socket.io").Socket, reason: import("socket.io").DisconnectReason) => void} options.offSocket Callback triggered when a socket disconnects
+   * @param {import("http").Server} options.server HTTP server to attach Socket.IO to
+   * @param {[String]} options.watch Collections to watch. If empty, will watch all collections
+   * @param {[String]} options.ignore Collections to ignore. Can override `watch`
    *
    */
   static init({
@@ -133,8 +133,8 @@ class MongoRealtime {
   /**
    * Notify all event listeners
    *
-   * @param {String} e - Name of the event
-   * @param {ChangeStreamDocument} change - Change Stream
+   * @param {String} e Name of the event
+   * @param {ChangeStreamDocument} change Change Stream
    */
   static notifyListeners(e, change) {
     if (this.#listeners[e]) {
@@ -147,8 +147,8 @@ class MongoRealtime {
   /**
    * Subscribe to an event
    *
-   * @param {String} key - Name of the event
-   * @param {(change:ChangeStreamDocument)=>void} cb - Callback
+   * @param {String} key Name of the event
+   * @param {(change:ChangeStreamDocument)=>void} cb Callback
    */
   static listen(key, cb) {
     if (!this.#listeners[key]) this.#listeners[key] = [];
@@ -158,8 +158,8 @@ class MongoRealtime {
   /**
    * Remove one or all listeners of an event
    *
-   * @param {String} key - Name of the event
-   * @param {(change:ChangeStreamDocument)=>void} cb - Callback
+   * @param {String} key Name of the event
+   * @param {(change:ChangeStreamDocument)=>void} cb Callback
    */
   static removeListener(key, cb) {
     if (cb) this.#listeners[key] = this.#listeners[key].filter((c) => c != cb);
