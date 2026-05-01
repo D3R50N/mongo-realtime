@@ -9,7 +9,9 @@ let loaded = false;
  */
 function loadEnvironment() {
   if (!loaded) {
-    dotenv.config();
+    dotenv.config({
+      quiet: true,
+    });
     loaded = true;
   }
 }
@@ -23,7 +25,8 @@ function loadEnvironment() {
  * @param {string} [overrides.path] WebSocket upgrade path.
  * @param {string} [overrides.mongoUri] MongoDB connection URI.
  * @param {string} [overrides.dbName] MongoDB database name.
- * @returns {{host: string, port: number, path: string, mongoUri: string, dbName: string}}
+ * @param {number} [overrides.cacheTtlMs] Cache TTL in milliseconds.
+ * @returns {{host: string, port: number, path: string, mongoUri: string, dbName: string, cacheTtlMs: number}}
  */
 function readEnvironmentOptions(overrides = {}) {
   loadEnvironment();
@@ -42,7 +45,29 @@ function readEnvironmentOptions(overrides = {}) {
       process.env.MONGODB_DB_NAME ||
       process.env.MONGO_DB ||
       "mongo_realtime_test",
+    cacheTtlMs:
+      normalizeCacheTtlMs(overrides.cacheTtlMs) ||
+      normalizeCacheTtlMs(process.env.CACHE_TTL_MS) ||
+      normalizeCacheTtlMs(process.env.CACHE_TTL_SECONDS, { seconds: true }) ||
+      5 * 60 * 1000,
   };
+}
+
+/**
+ * @param {unknown} value Candidate TTL value.
+ * @param {{seconds?: boolean}} [options]
+ * @returns {number|undefined}
+ */
+function normalizeCacheTtlMs(value, options = {}) {
+  if (typeof value === "string" && value.trim() !== "") {
+    value = Number(value);
+  }
+
+  if (typeof value !== "number" || Number.isNaN(value) || value < 0) {
+    return undefined;
+  }
+
+  return options.seconds ? Math.round(value * 1000) : value;
 }
 
 /**

@@ -35,6 +35,7 @@ class MongoRealTimeServer {
   #subscriptions;
   #eventHandlers;
   #queryCache;
+  #cacheTtlMs;
   /**
    * @param {object} [options={}] Server configuration.
    * @param {string} [options.host] Host used when this package owns the HTTP server.
@@ -42,6 +43,7 @@ class MongoRealTimeServer {
    * @param {string} [options.path] WebSocket upgrade path. Defaults to `/`.
    * @param {string} [options.mongoUri] MongoDB connection URI.
    * @param {string} [options.dbName] MongoDB database name.
+   * @param {number} [options.cacheTtlMs] Cache TTL in milliseconds.
    * @param {import('node:http').Server} [options.server] Existing HTTP server to attach to.
    * @param {import('mongodb').MongoClient} [options.mongoClient] Existing Mongo client to reuse.
    * @param {import('mongodb').Db} [options.db] Existing Mongo database handle to reuse.
@@ -74,6 +76,9 @@ class MongoRealTimeServer {
     this.#subscriptions = new Map();
     this.#eventHandlers = new Map();
     this.#queryCache = new Map();
+    this.#cacheTtlMs = Number.isInteger(resolved.cacheTtlMs)
+      ? resolved.cacheTtlMs
+      : 5 * 60 * 1000;
 
     if (
       !this.#ownsHttpServer &&
@@ -177,6 +182,10 @@ class MongoRealTimeServer {
           fullDocument: "updateLookup",
         })
         .on("change", (change) => {
+          Promise.resolve(this.#handleCacheChange(c.name, change)).catch(
+            () => {},
+          );
+
           const callHandler = (type = "change", docId = "") => {
             let eventName = `db:${type}:${c.name}`;
             if (!!docId) eventName += `:${docId}`;
@@ -230,6 +239,7 @@ class MongoRealTimeServer {
       await this.#mongoClient.close();
     }
 
+    this.#clearQueryCache();
     this.#started = false;
   }
 
@@ -368,7 +378,6 @@ class MongoRealTimeServer {
     const document = prepareDocumentForWrite(
       requiredObject(message.document, "document"),
     );
-    this.#clearQueryCache();
     await collection.insertOne(document);
   }
 
@@ -382,7 +391,6 @@ class MongoRealTimeServer {
     );
 
     ensureUpdateDoesNotChangeId(update);
-    this.#clearQueryCache();
     await collection.updateMany(filter, update);
   }
 
@@ -391,7 +399,6 @@ class MongoRealTimeServer {
       requiredString(message.collection, "collection"),
     );
     const filter = prepareFilter(optionalObject(message.filter));
-    this.#clearQueryCache();
     await collection.deleteMany(filter);
   }
 
@@ -527,6 +534,140 @@ class MongoRealTimeServer {
     return this.#db.collection(collectionName);
   }
 
+  #setQueryCacheEntry(collectionName, cacheKey, query, documents) {
+    const collectionCache = this.#getQueryCacheForCollection(collectionName);
+    const existing = collectionCache.get(cacheKey);
+
+    if (existing?.timeoutId) {
+      clearTimeout(existing.timeoutId);
+    }
+
+    const timeoutId = setTimeout(() => {
+      this.#deleteQueryCacheEntry(collectionName, cacheKey);
+    }, this.#cacheTtlMs);
+
+    collectionCache.set(cacheKey, {
+      query,
+      documents,
+      expiresAt: Date.now() + this.#cacheTtlMs,
+      timeoutId,
+    });
+  }
+
+  #deleteQueryCacheEntry(collectionName, cacheKey) {
+    const collectionCache = this.#queryCache.get(collectionName);
+    if (!collectionCache) {
+      return;
+    }
+
+    const entry = collectionCache.get(cacheKey);
+    if (!entry) {
+      return;
+    }
+
+    if (entry.timeoutId) {
+      clearTimeout(entry.timeoutId);
+    }
+
+    collectionCache.delete(cacheKey);
+  }
+
+  #clearQueryCacheForCollection(collectionName) {
+    const collectionCache = this.#queryCache.get(collectionName);
+    if (!collectionCache) {
+      return;
+    }
+
+    for (const [cacheKey] of collectionCache.entries()) {
+      this.#deleteQueryCacheEntry(collectionName, cacheKey);
+    }
+  }
+
+  #clearQueryCache() {
+    for (const collectionName of this.#queryCache.keys()) {
+      this.#clearQueryCacheForCollection(collectionName);
+    }
+  }
+
+  #getQueryCacheForCollection(collectionName) {
+    let collectionCache = this.#queryCache.get(collectionName);
+    if (!collectionCache) {
+      collectionCache = new Map();
+      this.#queryCache.set(collectionName, collectionCache);
+    }
+    return collectionCache;
+  }
+
+  async #handleCacheChange(collectionName, change) {
+    const collectionCache = this.#queryCache.get(collectionName);
+    if (!collectionCache || collectionCache.size === 0) {
+      return;
+    }
+
+    for (const [cacheKey, cached] of collectionCache.entries()) {
+      const query = cached.query;
+      if (this.#shouldRebuildCacheForQuery(query)) {
+        await this.#rebuildCachedQueryEntry(collectionName, cacheKey, query);
+        continue;
+      }
+
+      const existingIndex = cached.documents.findIndex(
+        (document) => document._id === serializeId(change.documentKey?._id),
+      );
+
+      switch (change.operationType) {
+        case "insert": {
+          const document = serializeDocument(change.fullDocument);
+          if (!document || !matchesFilter(document, query.filter)) {
+            break;
+          }
+          cached.documents.push(document);
+          break;
+        }
+        case "replace":
+        case "update": {
+          const document = serializeDocument(change.fullDocument);
+          const matchesAfter = document
+            ? matchesFilter(document, query.filter)
+            : false;
+
+          if (existingIndex >= 0) {
+            if (matchesAfter) {
+              cached.documents[existingIndex] = document;
+            } else {
+              cached.documents.splice(existingIndex, 1);
+            }
+          } else if (matchesAfter) {
+            cached.documents.push(document);
+          }
+          break;
+        }
+        case "delete": {
+          if (existingIndex >= 0) {
+            cached.documents.splice(existingIndex, 1);
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    }
+  }
+
+  #shouldRebuildCacheForQuery(query) {
+    return (
+      Object.keys(query.sort).length > 0 || typeof query.limit === "number"
+    );
+  }
+
+  async #rebuildCachedQueryEntry(collectionName, cacheKey, query) {
+    const collection = this.collection(collectionName);
+    const documents = await this.#findDocuments(collection, query, {
+      useCache: false,
+    });
+    this.#setQueryCacheEntry(collectionName, cacheKey, query, documents);
+  }
+
   #getQueryCacheKey(collection, query) {
     return JSON.stringify({
       collection,
@@ -536,19 +677,20 @@ class MongoRealTimeServer {
     });
   }
 
-  #clearQueryCache() {
-    this.#queryCache.clear();
-  }
-
-  async #findDocuments(collection, query) {
+  async #findDocuments(collection, query, options = { useCache: true }) {
     const cacheKey = this.#getQueryCacheKey(collection.collectionName, query);
-    const cached = this.#queryCache.get(cacheKey);
+    const collectionCache = this.#getQueryCacheForCollection(
+      collection.collectionName,
+    );
+    const cached = options.useCache ? collectionCache.get(cacheKey) : undefined;
     if (cached) {
-      return cached.map((doc) => deepCopy(doc));
+      if (cached.expiresAt == null || cached.expiresAt > Date.now()) {
+        return cached.documents.map((doc) => deepCopy(doc));
+      }
+      this.#deleteQueryCacheEntry(collection.collectionName, cacheKey);
     }
 
     let cursor = collection.find(prepareFilter(query.filter));
-
     if (Object.keys(query.sort).length > 0) {
       cursor = cursor.sort(query.sort);
     }
@@ -559,7 +701,12 @@ class MongoRealTimeServer {
 
     const documents = await cursor.toArray();
     const serialized = documents.map(serializeDocument);
-    this.#queryCache.set(cacheKey, serialized);
+    this.#setQueryCacheEntry(
+      collection.collectionName,
+      cacheKey,
+      query,
+      serialized,
+    );
     return serialized;
   }
 
