@@ -13,6 +13,7 @@ const {
   isPlainObject,
   matchesFilter,
 } = require("./query");
+const Stream = require("node:stream");
 
 /**
  * MongoRealTime WebSocket server backed by MongoDB.
@@ -29,6 +30,7 @@ class MongoRealTimeServer {
   #httpServer;
   #wss;
   #started;
+  #authenticate;
   #upgradeAttached;
   #connectionAttached;
   #socketSubscriptions;
@@ -44,6 +46,7 @@ class MongoRealTimeServer {
    * @param {string} [options.mongoUri] MongoDB connection URI.
    * @param {string} [options.dbName] MongoDB database name.
    * @param {number} [options.cacheTtlMs] Cache TTL in milliseconds.
+   * @param {(authData:any)=>Promise<boolean>} [options.authenticate] Cache TTL in milliseconds.
    * @param {import('node:http').Server} [options.server] Existing HTTP server to attach to.
    * @param {import('mongodb').MongoClient} [options.mongoClient] Existing Mongo client to reuse.
    * @param {import('mongodb').Db} [options.db] Existing Mongo database handle to reuse.
@@ -58,7 +61,7 @@ class MongoRealTimeServer {
     this.mongoUri = resolved.mongoUri;
     this.dbName = resolved.dbName;
     this.logger = options.logger ?? console;
-
+    this.#authenticate = options.authenticate;
     this.#mongoClient = options.mongoClient ?? null;
     this.#ownsMongoClient = !options.mongoClient;
     this.#db =
@@ -124,19 +127,21 @@ class MongoRealTimeServer {
 
     if (!this.#connectionAttached) {
       this.#connectionAttached = true;
-      this.#wss.on("connection", (socket) => this.#handleConnection(socket));
+      this.#wss.on("connection", (socket, req, stream) =>
+        this.#handleConnection(socket, req, stream),
+      );
     }
 
     if (!this.#upgradeAttached) {
       this.#upgradeAttached = true;
-      this.#httpServer.on("upgrade", (request, socket, head) => {
+      this.#httpServer.on("upgrade", async (request, socket, head) => {
         if (toPathname(request.url) !== this.path) {
           socket.destroy();
           return;
         }
 
         this.#wss.handleUpgrade(request, socket, head, (webSocket) => {
-          this.#wss.emit("connection", webSocket, request);
+          this.#wss.emit("connection", webSocket, request, socket);
         });
       });
     }
@@ -243,8 +248,33 @@ class MongoRealTimeServer {
     this.#started = false;
   }
 
-  #handleConnection(socket) {
+  /**
+   *
+   * @param {import('ws').WebSocket} socket
+   * @param {http.IncomingMessage} req
+   * @param {Stream.Duplex} stream
+   */
+  async #handleConnection(socket, req, stream) {
     this.#socketSubscriptions.set(socket, new Set());
+
+    if (typeof this.#authenticate === "function") {
+      let authData = req.headers.auth;
+      try {
+        authData = JSON.parse(authData);
+      } catch (_) {}
+
+      let authenticated = false;
+      try {
+        authenticated = await this.#authenticate(authData);
+      } catch (_) {}
+
+      if (!authenticated) {
+        this.#sendError(socket, "Socket authentification failed");
+        stream.destroy();
+        socket.close();
+        return;
+      }
+    }
 
     socket.on("message", (buffer) => {
       Promise.resolve(this.#handleMessage(socket, buffer)).catch((error) => {
