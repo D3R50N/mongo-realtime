@@ -266,7 +266,9 @@ class MongoRealTimeServer {
       let authenticated = false;
       try {
         authenticated = await this.#authenticate(authData);
-      } catch (_) {}
+      } catch (e) {
+        this.logger.warn("Authenticate exception", e);
+      }
 
       if (!authenticated) {
         this.#sendError(socket, "Socket authentification failed");
