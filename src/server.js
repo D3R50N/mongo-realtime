@@ -191,19 +191,28 @@ class MongoRealTimeServer {
             () => {},
           );
 
-          const callHandler = (type = "change", docId = "") => {
-            let eventName = `db:${type}:${c.name}`;
-            if (!!docId) eventName += `:${docId}`;
+          const callHandler = (
+            type = "change",
+            withColl = true,
+            docId = "",
+          ) => {
+            let eventName = `db:${type}`;
+            if (withColl) {
+              eventName += `:${c.name}`;
+              if (!!docId) eventName += `:${docId}`;
+            }
             const handler = this.#eventHandlers.get(eventName);
             try {
               handler?.(change);
             } catch (_) {}
           };
 
-          callHandler("change");
+          callHandler(change.operationType, true, change.documentKey._id);
+          callHandler("change", true, change.documentKey._id);
           callHandler(change.operationType);
-          callHandler("change", change.documentKey._id);
-          callHandler(change.operationType, change.documentKey._id);
+          callHandler("change");
+          callHandler(change.operationType, false);
+          callHandler("change", false);
         });
     }
   }
