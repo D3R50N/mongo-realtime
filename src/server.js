@@ -201,6 +201,16 @@ class MongoRealTimeServer {
               eventName += `:${c.name}`;
               if (!!docId) eventName += `:${docId}`;
             }
+            for (let socket of this.#socketSubscriptions.keys()) {
+              this.#send(socket, {
+                type: "realtime:db:change",
+                key: eventName,
+                collection: c.name,
+                docId: change.documentKey._id,
+                operation_type: change.operationType,
+                fullDocument: change.fullDocument,
+              });
+            }
             const handler = this.#eventHandlers.get(eventName);
             try {
               handler?.(change);
