@@ -13,7 +13,6 @@ const {
   isPlainObject,
   matchesFilter,
 } = require("./query");
-const Stream = require("node:stream");
 
 /**
  * MongoRealTime WebSocket server backed by MongoDB.
@@ -46,7 +45,7 @@ class MongoRealTimeServer {
    * @param {string} [options.mongoUri] MongoDB connection URI.
    * @param {string} [options.dbName] MongoDB database name.
    * @param {number} [options.cacheTtlMs] Cache TTL in milliseconds.
-   * @param {(authData:any)=>Promise<boolean>} [options.authenticate] Cache TTL in milliseconds.
+   * @param {(authData:any, request: import('node:http').IncomingMessage)=>boolean|Promise<boolean>} [options.authenticate] Optional connection authenticator.
    * @param {import('node:http').Server} [options.server] Existing HTTP server to attach to.
    * @param {import('mongodb').MongoClient} [options.mongoClient] Existing Mongo client to reuse.
    * @param {import('mongodb').Db} [options.db] Existing Mongo database handle to reuse.
@@ -127,9 +126,7 @@ class MongoRealTimeServer {
 
     if (!this.#connectionAttached) {
       this.#connectionAttached = true;
-      this.#wss.on("connection", (socket, req, stream) =>
-        this.#handleConnection(socket, req, stream),
-      );
+      this.#wss.on("connection", (socket) => this.#handleConnection(socket));
     }
 
     if (!this.#upgradeAttached) {
@@ -138,6 +135,25 @@ class MongoRealTimeServer {
         if (toPathname(request.url) !== this.path) {
           socket.destroy();
           return;
+        }
+
+        if (typeof this.#authenticate === "function") {
+          const authData =
+            parseAuthHeader(request.headers.auth) ??
+            parseTokenFromUrl(request.url);
+          let authenticated = false;
+
+          try {
+            authenticated = await this.#authenticate(authData, request);
+          } catch (error) {
+            this.logger.warn?.("Authenticate exception", error);
+          }
+
+          if (!authenticated) {
+            socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+            socket.destroy();
+            return;
+          }
         }
 
         this.#wss.handleUpgrade(request, socket, head, (webSocket) => {
@@ -201,19 +217,20 @@ class MongoRealTimeServer {
               eventName += `:${c.name}`;
               if (!!docId) eventName += `:${docId}`;
             }
-            for (let socket of this.#socketSubscriptions.keys()) {
-              this.#send(socket, {
-                type: "realtime:db:change",
-                key: eventName,
-                collection: c.name,
-                docId: change.documentKey._id,
-                operation_type: change.operationType,
-                fullDocument: change.fullDocument,
-              });
-            }
+
             const handler = this.#eventHandlers.get(eventName);
             try {
               handler?.(change);
+              for (let socket of this.#socketSubscriptions.keys()) {
+                this.#send(socket, {
+                  type: "realtime:db:change",
+                  key: eventName,
+                  collection: c.name,
+                  docId: change.documentKey._id,
+                  operationType: change.operationType,
+                  fullDocument: change.fullDocument,
+                });
+              }
             } catch (_) {}
           };
 
@@ -270,32 +287,9 @@ class MongoRealTimeServer {
   /**
    *
    * @param {import('ws').WebSocket} socket
-   * @param {http.IncomingMessage} req
-   * @param {Stream.Duplex} stream
    */
-  async #handleConnection(socket, req, stream) {
+  async #handleConnection(socket) {
     this.#socketSubscriptions.set(socket, new Set());
-
-    if (typeof this.#authenticate === "function") {
-      let authData = req.headers.auth;
-      try {
-        authData = JSON.parse(authData);
-      } catch (_) {}
-
-      let authenticated = false;
-      try {
-        authenticated = await this.#authenticate(authData);
-      } catch (e) {
-        this.logger.warn("Authenticate exception", e);
-      }
-
-      if (!authenticated) {
-        this.#sendError(socket, "Socket authentification failed");
-        stream.destroy();
-        socket.close();
-        return;
-      }
-    }
 
     socket.on("message", (buffer) => {
       Promise.resolve(this.#handleMessage(socket, buffer)).catch((error) => {
@@ -799,6 +793,45 @@ function normalizeQuery(message) {
   };
 }
 
+function parseAuthHeader(headerValue) {
+  if (Array.isArray(headerValue)) {
+    return parseAuthHeader(headerValue[0]);
+  }
+
+  if (typeof headerValue !== "string") {
+    return headerValue;
+  }
+
+  try {
+    return JSON.parse(headerValue);
+  } catch (_) {
+    return headerValue;
+  }
+}
+
+function parseTokenFromUrl(url) {
+  if (!url) {
+    return undefined;
+  }
+
+  try {
+    const searchParams = new URL(url, "http://localhost:3000").searchParams;
+    return (
+      searchParams.get("auth-token") ??
+      searchParams.get("authToken") ??
+      undefined
+    );
+  } catch {
+    const [, rawQuery = ""] = String(url).split("?");
+    const searchParams = new URLSearchParams(rawQuery);
+    return (
+      searchParams.get("auth-token") ??
+      searchParams.get("authToken") ??
+      undefined
+    );
+  }
+}
+
 function requiredString(value, field) {
   if (typeof value !== "string" || value.trim() === "") {
     throw new TypeError(`Expected "${field}" to be a non-empty string.`);
@@ -927,7 +960,7 @@ function toPathname(url) {
   }
 
   try {
-    return new URL(url, "http://localhost").pathname;
+    return new URL(url, "http://localhost:3000").pathname;
   } catch {
     return String(url).split("?")[0] || "/";
   }

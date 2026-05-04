@@ -226,9 +226,9 @@ The server emit internal events that can be listened inside the backend code usi
 - `db:OPERATION_TYPE:COLLECTION_NAME` : For a specific operation type on a specific collection
 - `db:OPERATION_TYPE:COLLECTION_NAME:DOCUMENT_ID` : For a specific operation type on a specific document
 
-`OPERATION_TYPE` can be `insert`, `update`, `delete` or `change` (matches all).\
-`COLLECTION_NAME` is the name of the collection, e.g. `users`.\
-`DOCUMENT_ID` is the string representation of the document's `_id`, e.g. `507f1f77bcf86cd799439011`.
+**`OPERATION_TYPE`** can be `insert`, `update`, `delete` or `change` (matches all).\
+**`COLLECTION_NAME`** is the name of the collection, e.g. `users`.\
+**`DOCUMENT_ID`** is the string representation of the document's `_id`, e.g. `507f1f77bcf86cd799439011`.
 
 Example:
 
@@ -242,6 +242,28 @@ server.on("db:update:orders:507f1f77bcf86cd799439011", (change) => {
     change.updateDescription,
   );
 });
+```
+
+It can also be listened inside the client on the event `realtime:db:change`.
+
+```js
+/* Client-side
+Receives this object
+{
+  operationType: 'insert' | 'update' | 'delete',
+  collection: 'users',
+  docId: '507f1f77bcf86cd799439011',
+  fullDocument: { ... }, // for insert and update
+}*/
+
+socket.addEventListener("message", (event) => {
+  const message = JSON.parse(event.data);
+  if (message.type === "realtime:db:change") {
+    console.log("Database change:", message);
+  }
+});
+
+
 ```
 
 ### Error responses
@@ -306,16 +328,20 @@ Returns a MongoDB collection handle for direct access.
 
 ## Authentication
 
-Provide an `authenticate` function to validate WebSocket connections. The incoming payload is read from the `auth` request header and parsed as JSON when possible.
+Provide an `authenticate` function to validate WebSocket connections. The incoming payload is read from the `auth` request header and parsed as JSON when possible. If the `auth` header is missing, the server falls back to the `token` query parameter from the WebSocket URL.
 
 Example:
 
 ```js
 const server = new MongoRealTimeServer({
-  authenticate: async (authData) => {
-    // Perform your authentication logic here, e.g. check a token or session.
-    // In this example, we simply check if the authData matches a hardcoded token.
-    return authData === "my-auth-token";
+  authenticate: async (authData, request) => {
+    // `authData` is the parsed `auth` header when present,
+    // otherwise it falls back to the `token` query parameter.
+    const token = new URL(
+      request.url,
+      "http://localhost:3000",
+    ).searchParams.get("token");
+    return authData?.session === "ok" || token === "my-auth-token";
   },
 });
 ```
