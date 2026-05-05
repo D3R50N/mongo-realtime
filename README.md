@@ -219,7 +219,7 @@ or:
 
 ### Server internal events
 
-The server emit internal events that can be listened inside the backend code using `server.on('MY_INTERNAL_EVENT', handler)`.\
+The server emit internal events that can be listened inside the backend code using `server.on('MY_INTERNAL_EVENT', handler)`. Registring the same event will override the previous handler.\
 `MY_INTERNAL_EVENT` follows these patterns:
 
 - `db:OPERATION_TYPE` : For any operation type on any collection
@@ -262,8 +262,6 @@ socket.addEventListener("message", (event) => {
     console.log("Database change:", message);
   }
 });
-
-
 ```
 
 ### Error responses
