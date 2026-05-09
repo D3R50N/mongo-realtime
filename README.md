@@ -105,6 +105,10 @@ Live changes are delivered as separate events:
 - `realtime:update`
 - `realtime:delete`
 
+When a subscription uses `limit`, the server may send a fresh `realtime:initial`
+snapshot after a change so the client always receives the exact post-change
+result set.
+
 ### `realtime:fetch`
 
 Fetch the current document set without keeping a live subscription.

@@ -13,6 +13,12 @@ const {
   isPlainObject,
   matchesFilter,
 } = require("./query");
+const {
+  cloneDocuments,
+  requiresSubscriptionResync,
+  resolveSubscriptionChange,
+  sameDocuments,
+} = require("./subscription-state");
 
 /**
  * MongoRealTime WebSocket server backed by MongoDB.
@@ -355,17 +361,15 @@ class MongoRealTimeServer {
       query,
       collection,
       changeStream,
+      documents: cloneDocuments(documents),
+      pending: Promise.resolve(),
     };
 
     this.#subscriptions.set(query.queryId, subscription);
     this.#socketSubscriptions.get(socket)?.add(query.queryId);
 
     changeStream.on("change", (change) => {
-      Promise.resolve(this.#forwardChange(query.queryId, change)).catch(
-        (error) => {
-          this.#sendError(socket, error, query.queryId);
-        },
-      );
+      this.#queueSubscriptionChange(query.queryId, change);
     });
 
     changeStream.on("error", (error) => {
@@ -502,12 +506,17 @@ class MongoRealTimeServer {
       return;
     }
 
-    const { socket, query, collection } = subscription;
+    const { socket, query } = subscription;
     if (socket.readyState !== 1) {
       return;
     }
 
-    const payload = await this.#buildChangePayload(collection, query, change);
+    if (requiresSubscriptionResync(query)) {
+      await this.#resyncSubscription(queryId);
+      return;
+    }
+
+    const payload = this.#buildChangePayload(subscription, change);
     if (!payload) {
       return;
     }
@@ -515,64 +524,66 @@ class MongoRealTimeServer {
     this.#send(socket, payload);
   }
 
-  async #buildChangePayload(collection, query, change) {
-    const collectionName = query.collection;
-
-    switch (change.operationType) {
-      case "insert": {
-        const document = serializeDocument(change.fullDocument);
-        if (!document || !matchesFilter(document, query.filter)) {
-          return null;
-        }
-
-        return {
-          type: "realtime:insert",
-          collection: collectionName,
-          document,
-        };
-      }
-      case "replace":
-      case "update": {
-        const id = serializeId(change.documentKey?._id);
-        if (!id) {
-          return null;
-        }
-
-        const before = await this.#findOneById(collection, id);
-        const current = serializeDocument(change.fullDocument);
-        const matchedBefore = before
-          ? matchesFilter(before, query.filter)
-          : false;
-        const matchedAfter = current
-          ? matchesFilter(current, query.filter)
-          : false;
-
-        if (!matchedBefore && !matchedAfter) {
-          return null;
-        }
-
-        return {
-          type: "realtime:update",
-          collection: collectionName,
-          document: current,
-          before,
-        };
-      }
-      case "delete": {
-        const id = serializeId(change.documentKey?._id);
-        if (!id) {
-          return null;
-        }
-
-        return {
-          type: "realtime:delete",
-          collection: collectionName,
-          documentId: id,
-        };
-      }
-      default:
-        return null;
+  #queueSubscriptionChange(queryId, change) {
+    const subscription = this.#subscriptions.get(queryId);
+    if (!subscription) {
+      return;
     }
+
+    const run = Promise.resolve(subscription.pending)
+      .catch(() => {})
+      .then(() => this.#forwardChange(queryId, change));
+
+    subscription.pending = run;
+    run.catch((error) => {
+      this.#sendError(subscription.socket, error, queryId);
+    });
+  }
+
+  async #resyncSubscription(queryId) {
+    const subscription = this.#subscriptions.get(queryId);
+    if (!subscription) {
+      return;
+    }
+
+    const documents = await this.#findDocuments(
+      subscription.collection,
+      subscription.query,
+      {
+        useCache: false,
+      },
+    );
+
+    if (sameDocuments(subscription.documents, documents)) {
+      subscription.documents = cloneDocuments(documents);
+      return;
+    }
+
+    subscription.documents = cloneDocuments(documents);
+    this.#send(subscription.socket, {
+      type: "realtime:initial",
+      collection: subscription.query.collection,
+      queryId: subscription.query.queryId,
+      documents,
+    });
+  }
+
+  #buildChangePayload(subscription, change) {
+    const result = resolveSubscriptionChange({
+      collection: subscription.query.collection,
+      query: subscription.query,
+      previousDocuments: subscription.documents,
+      change: {
+        operationType: change.operationType,
+        documentId:
+          serializeId(change.documentKey?._id) ??
+          serializeId(change.fullDocument?._id),
+        document: serializeDocument(change.fullDocument),
+      },
+    });
+
+    subscription.documents = result.documents;
+    return result.payload;
   }
 
   collection(collectionName) {
@@ -753,11 +764,6 @@ class MongoRealTimeServer {
       serialized,
     );
     return serialized;
-  }
-
-  async #findOneById(collection, id) {
-    const document = await collection.findOne({ _id: toMongoId(id) });
-    return serializeDocument(document);
   }
 
   async #connectMongo() {
