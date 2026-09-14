@@ -139,8 +139,7 @@ class MongoRealTimeServer {
       this.#upgradeAttached = true;
       this.#httpServer.on("upgrade", async (request, socket, head) => {
         if (toPathname(request.url) !== this.path) {
-          socket.destroy();
-          return;
+          return; // just ignore
         }
 
         if (typeof this.#authenticate === "function") {
@@ -342,6 +341,12 @@ class MongoRealTimeServer {
         return;
       case "realtime:emit":
         await this.#emit(socket, message);
+        return;
+      case "realtime:ping":
+        this.#send(socket, {
+          type: "realtime:pong",
+          timestamp: message.timestamp ?? Date.now(),
+        });
         return;
       default:
         throw new Error(`Unsupported message type "${message.type}".`);
@@ -873,14 +878,12 @@ function parsePayload(buffer) {
   return payload;
 }
 
-function normalizeMongoUpdate(update) {
-  if (isMongoOperatorUpdate(update)) {
-    return update;
-  }
+const ISO_DATE_REGEX =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$/;
 
-  return {
-    $set: update,
-  };
+function normalizeMongoUpdate(update) {
+  const normalized = isMongoOperatorUpdate(update) ? update : { $set: update };
+  return transformMongoValues(normalized);
 }
 
 function ensureUpdateDoesNotChangeId(update) {
@@ -901,21 +904,27 @@ function ensureUpdateDoesNotChangeId(update) {
 }
 
 function prepareFilter(filter) {
-  return transformMongoIds(filter);
+  return transformMongoValues(filter);
 }
 
 function prepareDocumentForWrite(document) {
-  return transformMongoIds(document);
+  return transformMongoValues(document);
 }
 
-function transformMongoIds(value, path = "") {
+function transformMongoValues(value, path = "") {
   if (Array.isArray(value)) {
-    return value.map((entry) => transformMongoIds(entry, path));
+    return value.map((entry) => transformMongoValues(entry, path));
   }
 
   if (!isPlainObject(value)) {
     if (path.endsWith("._id") || path === "_id") {
       return toMongoId(value);
+    }
+    if (typeof value === "string" && ISO_DATE_REGEX.test(value)) {
+      const parsed = new Date(value);
+      if (!isNaN(parsed.getTime())) {
+        return parsed;
+      }
     }
     return value;
   }
@@ -923,7 +932,7 @@ function transformMongoIds(value, path = "") {
   const next = {};
   for (const [key, entry] of Object.entries(value)) {
     const nextPath = path ? `${path}.${key}` : key;
-    next[key] = transformMongoIds(entry, nextPath);
+    next[key] = transformMongoValues(entry, nextPath);
   }
   return next;
 }

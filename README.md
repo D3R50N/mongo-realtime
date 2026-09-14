@@ -70,6 +70,14 @@ From client to server:
 - `realtime:update`
 - `realtime:delete`
 - `realtime:emit`
+- `realtime:ping` (Responds immediately with `{ type: "realtime:pong", timestamp }`)
+
+### Automatic Type Conversions (ObjectIds & Dates)
+
+Incoming documents and filters are automatically converted before writing to MongoDB:
+- Strings matching standard 24-character hexadecimal representation for `_id` fields are converted to `ObjectId`.
+- Strings matching ISO 8601 timestamps (e.g. `2026-09-14T15:00:00.000Z`) are parsed into native BSON `Date` objects so queries like `{ createdAt: -1 }` sort chronologically.
+- When sending documents back to clients, `ObjectId` instances are serialized as strings and BSON `Date` objects are serialized as ISO 8601 strings.
 
 ### `realtime:subscribe`
 
