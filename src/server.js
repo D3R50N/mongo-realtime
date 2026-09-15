@@ -28,6 +28,7 @@ const {
  * existing HTTP server such as one created for Express.
  */
 class MongoRealTimeServer {
+  #options;
   #mongoClient;
   #ownsMongoClient;
   #db;
@@ -55,11 +56,13 @@ class MongoRealTimeServer {
    * @param {import('node:http').Server} [options.server] Existing HTTP server to attach to.
    * @param {import('mongodb').MongoClient} [options.mongoClient] Existing Mongo client to reuse.
    * @param {import('mongodb').Db} [options.db] Existing Mongo database handle to reuse.
+   * @param {typeof import('mongodb').ObjectId} [options.ObjectId] Optional ObjectId class.
    * @param {{info?: Function, warn?: Function}} [options.logger] Logger compatible with `console`.
    */
   constructor(options = {}) {
     const resolved = readEnvironmentOptions(options);
 
+    this.#options = options;
     this.host = resolved.host;
     this.port = resolved.port;
     this.path = resolved.path;
@@ -231,9 +234,9 @@ class MongoRealTimeServer {
                   type: "realtime:db:change",
                   key: eventName,
                   collection: c.name,
-                  docId: change.documentKey._id,
+                  docId: serializeId(change.documentKey?._id),
                   operationType: change.operationType,
-                  fullDocument: change.fullDocument,
+                  fullDocument: serializeDocument(change.fullDocument),
                 });
               }
             } catch (_) {}
@@ -358,7 +361,9 @@ class MongoRealTimeServer {
     await this.#unsubscribe(query.queryId);
 
     const collection = this.collection(query.collection);
-    const documents = await this.#findDocuments(collection, query);
+    const documents = await this.#findDocuments(collection, query, {
+      useCache: false,
+    });
     const changeStream = collection.watch([], { fullDocument: "updateLookup" });
 
     const subscription = {
@@ -394,6 +399,7 @@ class MongoRealTimeServer {
     const documents = await this.#findDocuments(
       this.collection(query.collection),
       query,
+      { useCache: false },
     );
 
     this.#send(socket, {
@@ -429,8 +435,10 @@ class MongoRealTimeServer {
     const collection = this.collection(
       requiredString(message.collection, "collection"),
     );
+    const objectIdClass = this.#resolveObjectIdClass(collection);
     const document = prepareDocumentForWrite(
       requiredObject(message.document, "document"),
+      objectIdClass,
     );
     await collection.insertOne(document);
   }
@@ -439,9 +447,11 @@ class MongoRealTimeServer {
     const collection = this.collection(
       requiredString(message.collection, "collection"),
     );
-    const filter = prepareFilter(optionalObject(message.filter));
+    const objectIdClass = this.#resolveObjectIdClass(collection);
+    const filter = prepareFilter(optionalObject(message.filter), objectIdClass);
     const update = normalizeMongoUpdate(
       requiredObject(message.update, "update"),
+      objectIdClass,
     );
 
     ensureUpdateDoesNotChangeId(update);
@@ -452,7 +462,8 @@ class MongoRealTimeServer {
     const collection = this.collection(
       requiredString(message.collection, "collection"),
     );
-    const filter = prepareFilter(optionalObject(message.filter));
+    const objectIdClass = this.#resolveObjectIdClass(collection);
+    const filter = prepareFilter(optionalObject(message.filter), objectIdClass);
     await collection.deleteMany(filter);
   }
 
@@ -589,6 +600,16 @@ class MongoRealTimeServer {
 
     subscription.documents = result.documents;
     return result.payload;
+  }
+
+  #resolveObjectIdClass(collection) {
+    return (
+      this.#options?.ObjectId ??
+      collection?.s?.pkFactory?.createPk?.()?.constructor ??
+      this.#db?.client?.options?.pkFactory?.createPk?.()?.constructor ??
+      this.#mongoClient?.options?.pkFactory?.createPk?.()?.constructor ??
+      ObjectId
+    );
   }
 
   collection(collectionName) {
@@ -738,7 +759,7 @@ class MongoRealTimeServer {
     });
   }
 
-  async #findDocuments(collection, query, options = { useCache: true }) {
+  async #findDocuments(collection, query, options = { useCache: false }) {
     const cacheKey = this.#getQueryCacheKey(collection.collectionName, query);
     const collectionCache = this.#getQueryCacheForCollection(
       collection.collectionName,
@@ -751,7 +772,8 @@ class MongoRealTimeServer {
       this.#deleteQueryCacheEntry(collection.collectionName, cacheKey);
     }
 
-    let cursor = collection.find(prepareFilter(query.filter));
+    const objectIdClass = this.#resolveObjectIdClass(collection);
+    let cursor = collection.find(prepareFilter(query.filter, objectIdClass));
     if (Object.keys(query.sort).length > 0) {
       cursor = cursor.sort(query.sort);
     }
@@ -881,9 +903,9 @@ function parsePayload(buffer) {
 const ISO_DATE_REGEX =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$/;
 
-function normalizeMongoUpdate(update) {
+function normalizeMongoUpdate(update, objectIdClass = ObjectId) {
   const normalized = isMongoOperatorUpdate(update) ? update : { $set: update };
-  return transformMongoValues(normalized);
+  return transformMongoValues(normalized, "", objectIdClass);
 }
 
 function ensureUpdateDoesNotChangeId(update) {
@@ -903,22 +925,22 @@ function ensureUpdateDoesNotChangeId(update) {
   }
 }
 
-function prepareFilter(filter) {
-  return transformMongoValues(filter);
+function prepareFilter(filter, objectIdClass = ObjectId) {
+  return transformMongoValues(filter, "", objectIdClass);
 }
 
-function prepareDocumentForWrite(document) {
-  return transformMongoValues(document);
+function prepareDocumentForWrite(document, objectIdClass = ObjectId) {
+  return transformMongoValues(document, "", objectIdClass);
 }
 
-function transformMongoValues(value, path = "") {
+function transformMongoValues(value, path = "", objectIdClass = ObjectId) {
   if (Array.isArray(value)) {
-    return value.map((entry) => transformMongoValues(entry, path));
+    return value.map((entry) => transformMongoValues(entry, path, objectIdClass));
   }
 
   if (!isPlainObject(value)) {
     if (path.endsWith("._id") || path === "_id") {
-      return toMongoId(value);
+      return toMongoId(value, objectIdClass);
     }
     if (typeof value === "string" && ISO_DATE_REGEX.test(value)) {
       const parsed = new Date(value);
@@ -932,14 +954,33 @@ function transformMongoValues(value, path = "") {
   const next = {};
   for (const [key, entry] of Object.entries(value)) {
     const nextPath = path ? `${path}.${key}` : key;
-    next[key] = transformMongoValues(entry, nextPath);
+    next[key] = transformMongoValues(entry, nextPath, objectIdClass);
   }
   return next;
 }
 
-function toMongoId(value) {
-  if (typeof value === "string" && ObjectId.isValid(value)) {
-    return new ObjectId(value);
+function isObjectId(value) {
+  return Boolean(
+    value &&
+      (value instanceof ObjectId ||
+        value._bsontype === "ObjectId" ||
+        (typeof value === "object" &&
+          typeof value.toHexString === "function" &&
+          typeof value.equals === "function")),
+  );
+}
+
+function toMongoId(value, objectIdClass = ObjectId) {
+  if (isObjectId(value)) {
+    return value;
+  }
+  if (
+    typeof value === "string" &&
+    objectIdClass &&
+    typeof objectIdClass.isValid === "function" &&
+    objectIdClass.isValid(value)
+  ) {
+    return new objectIdClass(value);
   }
   return value;
 }
@@ -951,7 +992,7 @@ function serializeDocument(document) {
 
   return JSON.parse(
     JSON.stringify(document, (_, value) => {
-      if (value instanceof ObjectId) {
+      if (isObjectId(value)) {
         return value.toHexString();
       }
       if (value instanceof Date) {
@@ -966,7 +1007,7 @@ function serializeId(value) {
   if (!value) {
     return null;
   }
-  return value instanceof ObjectId ? value.toHexString() : String(value);
+  return isObjectId(value) ? value.toHexString() : String(value);
 }
 
 function toPathname(url) {
