@@ -340,9 +340,13 @@ Registers a handler for `realtime:emit` messages.
 
 Returns a MongoDB collection handle for direct access.
 
-### `server.get(collectionName, filter)`
+### `server.get(collectionName, filter, options)`
 
-Returns the cached collection documents. If not already cached, queries MongoDB, caches the result, and returns it. Automatically updated on database changes. Also available as a static method `MongoRealtime.get(collectionName)` or root import `get(collectionName)`.
+Returns the cached collection documents. If not already cached, queries MongoDB, caches the result, and returns it. Automatically updated on database changes. Also available as a static method `MongoRealtime.get(collectionName, filter, options)` or root import `get(collectionName, filter, options)`.
+
+- `collectionName`: String name of the collection.
+- `filter`: Optional MongoDB query filter object (e.g. `{ age: { $gt: 20 } }`).
+- `options`: Optional query options object (e.g. `{ limit: 10, sort: { createdAt: -1 } }`).
 
 ## Authentication
 

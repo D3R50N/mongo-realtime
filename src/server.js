@@ -708,25 +708,47 @@ class MongoRealtime {
   }
 
   /**
+   * @typedef {object} MongoRealtimeGetOptions
+   * @property {number|string} [limit] Maximum number of documents to return.
+   * @property {Record<string, 1|-1|number|string>} [sort] Sort order specification (e.g. { createdAt: -1 }).
+   */
+
+  /**
    * Returns the cached collection documents. If not already in cache,
    * queries MongoDB, stores the result in cache, and returns it.
    *
    * @param {string} collectionName Name of the collection.
-   * @param {object} [filter={}] Optional filter object.
+   * @param {object} [filter={}] Optional query filter.
+   * @param {MongoRealtimeGetOptions} [options={}] Optional query options.
+   * @param {number|string} [options.limit] Maximum number of documents to return.
+   * @param {Record<string, 1|-1|number|string>} [options.sort] Sort order specification (e.g. { createdAt: -1 }).
    * @returns {Array<object>|Promise<Array<object>>}
    */
-  get(collectionName, filter = {}) {
+  get(collectionName, filter = {}, options = {}) {
     if (typeof collectionName !== "string" || collectionName.trim() === "") {
       throw new TypeError('Expected "collectionName" to be a non-empty string.');
     }
 
     const colName = collectionName.trim();
+    const queryFilter = filter && typeof filter === "object" ? filter : {};
+    const queryOptions = options && typeof options === "object" ? options : {};
+
+    let limit = queryOptions.limit;
+    if (typeof limit === "string") {
+      const parsed = parseInt(limit, 10);
+      limit = Number.isNaN(parsed) ? undefined : parsed;
+    }
+
+    const sort =
+      queryOptions.sort && typeof queryOptions.sort === "object"
+        ? queryOptions.sort
+        : {};
+
     const query = {
       collection: colName,
-      filter:
-        filter && typeof filter === "object" ? (filter.filter ?? filter) : {},
-      sort: filter && typeof filter === "object" && filter.sort ? filter.sort : {},
-      limit: filter && typeof filter === "object" ? filter.limit : undefined,
+      filter: queryFilter,
+      sort,
+      limit,
     };
 
     const cacheKey = this.#getQueryCacheKey(colName, query);
@@ -758,14 +780,17 @@ class MongoRealtime {
    * Returns the cached collection documents from the current server instance.
    *
    * @param {string} collectionName Name of the collection.
-   * @param {object} [filter={}] Optional filter object.
+   * @param {object} [filter={}] Optional query filter.
+   * @param {MongoRealtimeGetOptions} [options={}] Optional query options.
+   * @param {number|string} [options.limit] Maximum number of documents to return.
+   * @param {Record<string, 1|-1|number|string>} [options.sort] Sort order specification (e.g. { createdAt: -1 }).
    * @returns {Array<object>|Promise<Array<object>>}
    */
-  static get(collectionName, filter = {}) {
+  static get(collectionName, filter = {}, options = {}) {
     if (!MongoRealtime.#instance) {
       throw new Error("No MongoRealtime instance has been created yet.");
     }
-    return MongoRealtime.#instance.get(collectionName, filter);
+    return MongoRealtime.#instance.get(collectionName, filter, options);
   }
 
   #setQueryCacheEntry(collectionName, cacheKey, query, documents) {
