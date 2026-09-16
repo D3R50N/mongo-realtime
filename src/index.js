@@ -1,15 +1,20 @@
 'use strict';
 
 const { loadEnvironment } = require('./env');
-const { MongoRealTimeServer } = require('./server');
+const { MongoRealtime } = require('./server');
 
 loadEnvironment();
 
 /**
  * Public package export.
  *
- * @type {{MongoRealTimeServer: typeof import('./server').MongoRealTimeServer}}
+ * @type {{
+ *   MongoRealtime: typeof import('./server').MongoRealtime,
+ *   get: (collectionName: string, filter?: object) => Array<object>|Promise<Array<object>>
+ * }}
  */
 module.exports = {
-  MongoRealTimeServer,
+  MongoRealtime,
+  get: (collectionName, filter) => MongoRealtime.get(collectionName, filter),
 };
+

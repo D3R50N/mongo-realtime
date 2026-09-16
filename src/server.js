@@ -27,7 +27,8 @@ const {
  * You can either let it create and own its HTTP server, or attach it to an
  * existing HTTP server such as one created for Express.
  */
-class MongoRealTimeServer {
+class MongoRealtime {
+  static #instance = null;
   #options;
   #mongoClient;
   #ownsMongoClient;
@@ -49,6 +50,7 @@ class MongoRealTimeServer {
   #eventHandlers;
   #queryCache;
   #cacheTtlMs;
+  #watchedCollections;
   /**
    * @param {object} [options={}] Server configuration.
    * @param {string} [options.host] Host used when this package owns the HTTP server.
@@ -147,16 +149,19 @@ class MongoRealTimeServer {
     this.#subscriptions = new Map();
     this.#eventHandlers = new Map();
     this.#queryCache = new Map();
+    this.#watchedCollections = new Set();
     this.#cacheTtlMs = Number.isInteger(resolved.cacheTtlMs)
       ? resolved.cacheTtlMs
       : 5 * 60 * 1000;
+
+    MongoRealtime.#instance = this;
 
     if (
       !this.#ownsHttpServer &&
       (options.host != null || options.port != null)
     ) {
       this.logger.warn?.(
-        'MongoRealTimeServer received "host" or "port" with an external HTTP server; those options are ignored.',
+        'MongoRealtime received "host" or "port" with an external HTTP server; those options are ignored.',
       );
     }
   }
@@ -165,8 +170,8 @@ class MongoRealTimeServer {
    * Registers a custom event handler for `realtime:emit` messages.
    *
    * @param {string} eventName Custom event name.
-   * @param {(payload: any, context: {socket: any, server: MongoRealTimeServer, requestId?: string}) => any | Promise<any>} handler
-   * @returns {MongoRealTimeServer}
+   * @param {(payload: any, context: {socket: any, server: MongoRealtime, requestId?: string}) => any | Promise<any>} handler
+   * @returns {MongoRealtime}
    */
   on(eventName, handler) {
     if (typeof eventName !== "string" || eventName.trim() === "") {
@@ -184,7 +189,7 @@ class MongoRealTimeServer {
    * Connects MongoDB, attaches WebSocket handlers, and starts listening when
    * the package owns the HTTP server.
    *
-   * @returns {Promise<MongoRealTimeServer>}
+   * @returns {Promise<MongoRealtime>}
    */
   async start() {
     if (this.#started) {
@@ -252,11 +257,11 @@ class MongoRealTimeServer {
     this.#started = true;
     if (this.#ownsHttpServer) {
       this.logger.info?.(
-        `MongoRealTime server listening on ws://${this.host}:${this.port}${this.path}`,
+        `\x1b[36mMongoRealTime server listening on ws://${this.host}:${this.port}${this.path}\x1b[0m`,
       );
     } else {
       this.logger.info?.(
-        `MongoRealTime server attached to an external HTTP server on path ${this.path}`,
+        `\x1b[36mMongoRealTime server attached to an external HTTP server on path ${this.path}\x1b[0m`,
       );
     }
 
@@ -266,12 +271,23 @@ class MongoRealTimeServer {
   async #listenInternHandlers() {
     const collections = await this.#db.listCollections().toArray();
     for (let c of collections) {
-      this.collection(c.name)
+      this.#watchCollection(c.name);
+    }
+  }
+
+  #watchCollection(collectionName) {
+    if (this.#watchedCollections.has(collectionName) || !this.#db) {
+      return;
+    }
+    this.#watchedCollections.add(collectionName);
+
+    try {
+      this.collection(collectionName)
         .watch([], {
           fullDocument: "updateLookup",
         })
         .on("change", (change) => {
-          Promise.resolve(this.#handleCacheChange(c.name, change)).catch(
+          Promise.resolve(this.#handleCacheChange(collectionName, change)).catch(
             () => {},
           );
 
@@ -282,7 +298,7 @@ class MongoRealTimeServer {
           ) => {
             let eventName = `db:${type}`;
             if (withColl) {
-              eventName += `:${c.name}`;
+              eventName += `:${collectionName}`;
               if (!!docId) eventName += `:${docId}`;
             }
 
@@ -293,7 +309,7 @@ class MongoRealTimeServer {
                 this.#send(socket, {
                   type: "realtime:db:change",
                   key: eventName,
-                  collection: c.name,
+                  collection: collectionName,
                   docId: serializeId(change.documentKey?._id),
                   operationType: change.operationType,
                   fullDocument: serializeDocument(change.fullDocument),
@@ -302,14 +318,14 @@ class MongoRealTimeServer {
             } catch (_) {}
           };
 
-          callHandler(change.operationType, true, change.documentKey._id);
-          callHandler("change", true, change.documentKey._id);
+          callHandler(change.operationType, true, change.documentKey?._id);
+          callHandler("change", true, change.documentKey?._id);
           callHandler(change.operationType);
           callHandler("change");
           callHandler(change.operationType, false);
           callHandler("change", false);
         });
-    }
+    } catch (_) {}
   }
 
   /**
@@ -357,8 +373,12 @@ class MongoRealTimeServer {
     }
 
     this.#clearQueryCache();
+    this.#watchedCollections.clear();
     this.#started = false;
     this.#connectedNotified = false;
+    if (MongoRealtime.#instance === this) {
+      MongoRealtime.#instance = null;
+    }
   }
 
   /**
@@ -685,6 +705,67 @@ class MongoRealTimeServer {
 
   collection(collectionName) {
     return this.#db.collection(collectionName);
+  }
+
+  /**
+   * Returns the cached collection documents. If not already in cache,
+   * queries MongoDB, stores the result in cache, and returns it.
+   *
+   * @param {string} collectionName Name of the collection.
+   * @param {object} [filter={}] Optional filter object.
+   * @returns {Array<object>|Promise<Array<object>>}
+   */
+  get(collectionName, filter = {}) {
+    if (typeof collectionName !== "string" || collectionName.trim() === "") {
+      throw new TypeError('Expected "collectionName" to be a non-empty string.');
+    }
+
+    const colName = collectionName.trim();
+    const query = {
+      collection: colName,
+      filter:
+        filter && typeof filter === "object" ? (filter.filter ?? filter) : {},
+      sort: filter && typeof filter === "object" && filter.sort ? filter.sort : {},
+      limit: filter && typeof filter === "object" ? filter.limit : undefined,
+    };
+
+    const cacheKey = this.#getQueryCacheKey(colName, query);
+    const collectionCache = this.#queryCache.get(colName);
+    const cached = collectionCache?.get(cacheKey);
+
+    if (cached) {
+      if (cached.expiresAt == null || cached.expiresAt > Date.now()) {
+        return cached.documents.map((doc) => deepCopy(doc));
+      }
+      this.#deleteQueryCacheEntry(colName, cacheKey);
+    }
+
+    return this.#fetchAndCacheCollection(colName, query);
+  }
+
+  async #fetchAndCacheCollection(collectionName, query) {
+    if (!this.#db) {
+      await this.#connectMongo();
+    }
+
+    const collection = this.collection(collectionName);
+    this.#watchCollection(collectionName);
+
+    return this.#findDocuments(collection, query, { useCache: true });
+  }
+
+  /**
+   * Returns the cached collection documents from the current server instance.
+   *
+   * @param {string} collectionName Name of the collection.
+   * @param {object} [filter={}] Optional filter object.
+   * @returns {Array<object>|Promise<Array<object>>}
+   */
+  static get(collectionName, filter = {}) {
+    if (!MongoRealtime.#instance) {
+      throw new Error("No MongoRealtime instance has been created yet.");
+    }
+    return MongoRealtime.#instance.get(collectionName, filter);
   }
 
   #setQueryCacheEntry(collectionName, cacheKey, query, documents) {
@@ -1280,5 +1361,5 @@ function toPathname(url) {
 }
 
 module.exports = {
-  MongoRealTimeServer,
+  MongoRealtime,
 };

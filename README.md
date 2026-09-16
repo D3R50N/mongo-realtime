@@ -12,9 +12,9 @@ npm install mongo-realtime
 ## Quick start
 
 ```js
-const { MongoRealTimeServer } = require("mongo-realtime");
+const { MongoRealtime } = require("mongo-realtime");
 
-const server = new MongoRealTimeServer({
+const server = new MongoRealtime({
   mongoUri: "mongodb://localhost:27017/mydb",
   dbName: "mydb",
 });
@@ -78,6 +78,7 @@ From client to server:
 ### Automatic Type Conversions (ObjectIds & Dates)
 
 Incoming documents and filters are automatically converted before writing to MongoDB:
+
 - Strings matching standard 24-character hexadecimal representation for `_id` fields are converted to `ObjectId`.
 - Strings matching ISO 8601 timestamps (e.g. `2026-09-14T15:00:00.000Z`) are parsed into native BSON `Date` objects so queries like `{ createdAt: -1 }` sort chronologically.
 - When sending documents back to clients, `ObjectId` instances are serialized as strings and BSON `Date` objects are serialized as ISO 8601 strings.
@@ -319,7 +320,7 @@ Nested document paths are supported. `_id` strings are automatically converted t
 
 ## API
 
-### `new MongoRealTimeServer(options)`
+### `new MongoRealtime(options)`
 
 Creates a new server instance.
 
@@ -339,6 +340,10 @@ Registers a handler for `realtime:emit` messages.
 
 Returns a MongoDB collection handle for direct access.
 
+### `server.get(collectionName, filter)`
+
+Returns the cached collection documents. If not already cached, queries MongoDB, caches the result, and returns it. Automatically updated on database changes. Also available as a static method `MongoRealtime.get(collectionName)` or root import `get(collectionName)`.
+
 ## Authentication
 
 Provide an `authenticate` function to validate WebSocket connections. The incoming payload is read from the `auth` request header and parsed as JSON when possible. If the `auth` header is missing, the server falls back to the `token` query parameter from the WebSocket URL.
@@ -346,7 +351,7 @@ Provide an `authenticate` function to validate WebSocket connections. The incomi
 Example:
 
 ```js
-const server = new MongoRealTimeServer({
+const server = new MongoRealtime({
   authenticate: async (authData, request) => {
     // `authData` is the parsed `auth` header when present,
     // otherwise it falls back to the `token` query parameter.
@@ -364,12 +369,12 @@ const server = new MongoRealTimeServer({
 ```js
 const http = require("node:http");
 const express = require("express");
-const { MongoRealTimeServer } = require("mongo-realtime");
+const { MongoRealtime } = require("mongo-realtime");
 
 const app = express();
 const httpServer = http.createServer(app);
 
-const realtimeServer = new MongoRealTimeServer({
+const realtimeServer = new MongoRealtime({
   server: httpServer, // needs to be the raw HTTP server, not the Express app
   path: "/", // WebSocket path
   mongoUri: "mongodb://localhost:27017/mydb",
@@ -381,7 +386,7 @@ await new Promise((resolve, reject) => {
   httpServer.listen(3000, "0.0.0.0", resolve);
 });
 
-await realtimeServer.start(); // start the MongoRealTimeServer after the HTTP server is listening
+await realtimeServer.start(); // start the MongoRealtime after the HTTP server is listening
 ```
 
 ## Notes
