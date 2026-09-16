@@ -38,8 +38,11 @@ The constructor accepts these options:
 - `dbName` - MongoDB database name.
 - `cacheTtlMs` - Query result cache TTL in milliseconds (`300000` by default).
 - `authenticate` - Optional async function to validate incoming socket connections.
+- `onConnected` - Optional callback `(db, url) => ...` called upon connecting to the database. The database connection URL is directly accessible via `db.url` (or `db.mongoUri`, `db.connectionString`, or the 2nd argument).
 - `server` - Optional existing HTTP server to attach the WebSocket endpoint.
 - `mongoClient` - Optional existing `MongoClient` instance.
+- `mongoose` - Optional `mongoose` instance or connection.
+- `connection` - Optional existing Mongoose connection.
 - `db` - Optional existing MongoDB `Db` instance.
 - `logger` - Optional `{ info?, warn? }` logger object.
 

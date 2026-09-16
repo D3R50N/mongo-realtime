@@ -31,12 +31,17 @@ class MongoRealTimeServer {
   #options;
   #mongoClient;
   #ownsMongoClient;
+  #mongoose;
+  #mongooseConnection;
+  #ownsMongo;
   #db;
   #ownsHttpServer;
   #httpServer;
   #wss;
   #started;
   #authenticate;
+  #onConnected;
+  #connectedNotified;
   #upgradeAttached;
   #connectionAttached;
   #socketSubscriptions;
@@ -53,8 +58,11 @@ class MongoRealTimeServer {
    * @param {string} [options.dbName] MongoDB database name.
    * @param {number} [options.cacheTtlMs] Cache TTL in milliseconds.
    * @param {(authData:any, request: import('node:http').IncomingMessage)=>boolean|Promise<boolean>} [options.authenticate] Optional connection authenticator.
+   * @param {(db: import('mongodb').Db, url?: string)=>void|Promise<void>} [options.onConnected] Callback invoked when connected to the database.
    * @param {import('node:http').Server} [options.server] Existing HTTP server to attach to.
    * @param {import('mongodb').MongoClient} [options.mongoClient] Existing Mongo client to reuse.
+   * @param {any} [options.mongoose] Existing Mongoose instance or connection.
+   * @param {any} [options.connection] Existing Mongoose connection.
    * @param {import('mongodb').Db} [options.db] Existing Mongo database handle to reuse.
    * @param {typeof import('mongodb').ObjectId} [options.ObjectId] Optional ObjectId class.
    * @param {{info?: Function, warn?: Function}} [options.logger] Logger compatible with `console`.
@@ -70,11 +78,63 @@ class MongoRealTimeServer {
     this.dbName = resolved.dbName;
     this.logger = options.logger ?? console;
     this.#authenticate = options.authenticate;
+    this.#onConnected = options.onConnected ?? null;
+    this.#connectedNotified = false;
+
     this.#mongoClient = options.mongoClient ?? null;
     this.#ownsMongoClient = !options.mongoClient;
-    this.#db =
-      options.db ??
-      (options.mongoClient ? options.mongoClient.db(this.dbName) : null);
+    this.#mongoose = null;
+    this.#mongooseConnection = null;
+    this.#ownsMongo = false;
+
+    const rawMongoose = options.mongoose ?? options.connection ?? null;
+    if (rawMongoose) {
+      if (typeof rawMongoose === "object" && rawMongoose !== null) {
+        if (rawMongoose.connection) {
+          this.#mongoose = rawMongoose;
+          this.#mongooseConnection = rawMongoose.connection;
+        } else if (
+          typeof rawMongoose.openUri === "function" ||
+          typeof rawMongoose.asPromise === "function" ||
+          rawMongoose.readyState != null
+        ) {
+          this.#mongooseConnection = rawMongoose;
+          this.#mongoose = rawMongoose.base ?? null;
+        } else {
+          this.#mongoose = rawMongoose;
+        }
+      } else if (rawMongoose === true) {
+        try {
+          this.#mongoose = require("mongoose");
+          this.#mongooseConnection = this.#mongoose.connection;
+        } catch (_) {}
+      }
+    }
+
+    if (options.db) {
+      this.#db = options.db;
+    } else if (this.#mongoClient) {
+      this.#db = this.#mongoClient.db(this.dbName);
+    } else if (
+      this.#mongooseConnection &&
+      this.#mongooseConnection.readyState === 1 &&
+      this.#mongooseConnection.db
+    ) {
+      this.#db =
+        this.dbName &&
+        this.#mongooseConnection.name !== this.dbName &&
+        typeof this.#mongooseConnection.useDb === "function"
+          ? this.#mongooseConnection.useDb(this.dbName).db
+          : this.#mongooseConnection.db;
+      this.#mongoClient =
+        this.#mongooseConnection.getClient?.() ??
+        this.#mongooseConnection.client ??
+        this.#mongoClient;
+      this.#ownsMongoClient = false;
+      this.#ownsMongo = false;
+    } else {
+      this.#db = null;
+    }
 
     this.#ownsHttpServer = !options.server;
     this.#httpServer = options.server ?? http.createServer();
@@ -284,12 +344,21 @@ class MongoRealTimeServer {
       });
     }
 
-    if (this.#ownsMongoClient && this.#mongoClient) {
+    if (this.#ownsMongo) {
+      try {
+        if (this.#mongooseConnection?.close) {
+          await this.#mongooseConnection.close();
+        } else if (this.#mongoose?.disconnect) {
+          await this.#mongoose.disconnect();
+        }
+      } catch (_) {}
+    } else if (this.#ownsMongoClient && this.#mongoClient) {
       await this.#mongoClient.close();
     }
 
     this.#clearQueryCache();
     this.#started = false;
+    this.#connectedNotified = false;
   }
 
   /**
@@ -605,6 +674,8 @@ class MongoRealTimeServer {
   #resolveObjectIdClass(collection) {
     return (
       this.#options?.ObjectId ??
+      this.#mongoose?.Types?.ObjectId ??
+      this.#mongooseConnection?.base?.Types?.ObjectId ??
       collection?.s?.pkFactory?.createPk?.()?.constructor ??
       this.#db?.client?.options?.pkFactory?.createPk?.()?.constructor ??
       this.#mongoClient?.options?.pkFactory?.createPk?.()?.constructor ??
@@ -793,14 +864,200 @@ class MongoRealTimeServer {
     return serialized;
   }
 
-  async #connectMongo() {
-    if (this.#db) {
+  #decorateDb(url) {
+    if (!this.#db) {
       return;
     }
 
-    this.#mongoClient = new MongoClient(this.mongoUri);
-    await this.#mongoClient.connect();
-    this.#db = this.#mongoClient.db(this.dbName);
+    const connectionUrl =
+      this.#mongooseConnection?._connectionString ||
+      this.#mongoose?.connection?._connectionString ||
+      this.#mongoClient?.s?.url ||
+      this.#db?.client?.s?.url;
+
+    const resolvedUrl =
+      url ||
+      this.#options.mongoUri ||
+      connectionUrl ||
+      this.mongoUri ||
+      this.#db.url ||
+      (Array.isArray(this.#mongoClient?.options?.hosts)
+        ? this.#mongoClient.options.hosts.map(String).join(",")
+        : null);
+
+    if (resolvedUrl) {
+      if (!this.mongoUri) {
+        this.mongoUri = resolvedUrl;
+      }
+      try {
+        Object.defineProperty(this.#db, "url", {
+          value: resolvedUrl,
+          writable: true,
+          configurable: true,
+          enumerable: true,
+        });
+      } catch (_) {
+        this.#db.url = resolvedUrl;
+      }
+
+      try {
+        Object.defineProperty(this.#db, "mongoUri", {
+          value: resolvedUrl,
+          writable: true,
+          configurable: true,
+          enumerable: true,
+        });
+      } catch (_) {
+        this.#db.mongoUri = resolvedUrl;
+      }
+
+      try {
+        Object.defineProperty(this.#db, "connectionString", {
+          value: resolvedUrl,
+          writable: true,
+          configurable: true,
+          enumerable: true,
+        });
+      } catch (_) {
+        this.#db.connectionString = resolvedUrl;
+      }
+
+      if (this.#mongoClient) {
+        try {
+          this.#mongoClient.url = resolvedUrl;
+          this.#mongoClient.mongoUri = resolvedUrl;
+          this.#mongoClient.connectionString = resolvedUrl;
+        } catch (_) {}
+      }
+    }
+
+    if (this.#mongoClient && !this.#db.client) {
+      try {
+        this.#db.client = this.#mongoClient;
+      } catch (_) {}
+    }
+
+    if (this.#mongooseConnection && !this.#db.connection) {
+      try {
+        this.#db.connection = this.#mongooseConnection;
+      } catch (_) {}
+    }
+
+    if (this.#mongoose && !this.#db.mongoose) {
+      try {
+        this.#db.mongoose = this.#mongoose;
+      } catch (_) {}
+    }
+  }
+
+  async #notifyConnected() {
+    if (this.#connectedNotified) {
+      return;
+    }
+    this.#connectedNotified = true;
+
+    const callback = this.#onConnected;
+    if (typeof callback === "function") {
+      try {
+        await callback(this.#db, this.mongoUri);
+      } catch (error) {
+        this.logger.warn?.("onConnected callback exception", error);
+      }
+    }
+  }
+
+  async #connectMongo() {
+    if (this.#db) {
+      this.#decorateDb();
+      await this.#notifyConnected();
+      return;
+    }
+
+    let mongoose = this.#mongoose;
+    let mongooseConn = this.#mongooseConnection;
+
+    if (!mongoose && !mongooseConn && !this.#mongoClient && !this.#options.db) {
+      try {
+        const mg = require("mongoose");
+        if (
+          mg?.connection &&
+          (mg.connection.readyState === 1 || mg.connection.readyState === 2)
+        ) {
+          mongoose = mg;
+          mongooseConn = mg.connection;
+        } else if (
+          mg &&
+          this.#options.useMongoose !== false &&
+          this.#options.mongoose !== false
+        ) {
+          mongoose = mg;
+          mongooseConn = mg.connection;
+        }
+      } catch (_) {}
+    }
+
+    if (mongooseConn || mongoose) {
+      const connOptions = this.dbName ? { dbName: this.dbName } : {};
+
+      if (mongooseConn) {
+        if (mongooseConn.readyState === 1 && mongooseConn.db) {
+          // Connected already
+        } else if (
+          mongooseConn.readyState === 2 &&
+          typeof mongooseConn.asPromise === "function"
+        ) {
+          await mongooseConn.asPromise();
+        } else if (typeof mongooseConn.openUri === "function") {
+          this.#ownsMongo = true;
+          await mongooseConn.openUri(this.mongoUri, connOptions);
+        } else if (typeof mongoose?.connect === "function") {
+          this.#ownsMongo = true;
+          await mongoose.connect(this.mongoUri, connOptions);
+          mongooseConn = mongoose.connection;
+        }
+      } else if (typeof mongoose.connect === "function") {
+        if (mongoose.connection?.readyState === 1 && mongoose.connection.db) {
+          mongooseConn = mongoose.connection;
+        } else if (
+          mongoose.connection?.readyState === 2 &&
+          typeof mongoose.connection.asPromise === "function"
+        ) {
+          await mongoose.connection.asPromise();
+          mongooseConn = mongoose.connection;
+        } else {
+          this.#ownsMongo = true;
+          await mongoose.connect(this.mongoUri, connOptions);
+          mongooseConn = mongoose.connection;
+        }
+      }
+
+      this.#mongoose = mongoose;
+      this.#mongooseConnection = mongooseConn;
+
+      if (mongooseConn) {
+        this.#db =
+          this.dbName &&
+          mongooseConn.name !== this.dbName &&
+          typeof mongooseConn.useDb === "function"
+            ? mongooseConn.useDb(this.dbName).db
+            : mongooseConn.db;
+        this.#mongoClient =
+          mongooseConn.getClient?.() ??
+          mongooseConn.client ??
+          this.#mongoClient;
+        this.#ownsMongoClient = false;
+      }
+    }
+
+    if (!this.#db) {
+      this.#mongoClient = new MongoClient(this.mongoUri);
+      await this.#mongoClient.connect();
+      this.#ownsMongoClient = true;
+      this.#db = this.#mongoClient.db(this.dbName);
+    }
+
+    this.#decorateDb();
+    await this.#notifyConnected();
   }
 
   #send(socket, payload) {
